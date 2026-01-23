@@ -104,7 +104,8 @@ def main():
         return
 
     # 2. Setup Model
-    model = create_model(len(class_names), pretrained=config.PRETRAINED)
+    # Explicitly pass class count from config, as get_data_loaders might return list
+    model = create_model(config.NUM_CLASSES, pretrained=config.PRETRAINED)
     
     # 3. Setup Training Components
     criterion = nn.CrossEntropyLoss()
