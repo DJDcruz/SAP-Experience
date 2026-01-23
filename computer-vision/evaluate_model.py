@@ -43,7 +43,8 @@ def evaluate_model():
     checkpoint_path = os.path.join(config.CHECKPOINT_DIR, config.BEST_MODEL_PATH)
     
     # Note: Using class_names from data loader for accurate count
-    model = load_trained_model(checkpoint_path, len(class_names))
+    # Use NUM_CLASSES from config to ensure match with training
+    model = load_trained_model(checkpoint_path, config.NUM_CLASSES)
     model.eval()
     
     all_preds = []

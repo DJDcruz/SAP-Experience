@@ -74,15 +74,21 @@ class EmotionDetector:
                 pass
 
 class EfficientNetEmotionDetector:
-    def __init__(self, model_path="checkpoints/best_efficientnet_b3.pth", num_classes=3, class_names=None):
+    def __init__(self, model_path="checkpoints/best_efficientnet_b3.pth", num_classes=config.NUM_CLASSES, class_names=None):
         self.device = config.DEVICE
-        self.emotion_colors = {
-            'happy': (0, 255, 0),      # Green
-            'neutral': (255, 255, 0),  # Cyan
-            'stressed': (0, 165, 255)  # Orange
+        base_colors = {
+            'angry': (0, 0, 255),       # Red
+            'disgust': (0, 128, 0),     # Dark green
+            'fear': (128, 0, 128),      # Purple
+            'happy': (0, 255, 0),       # Green
+            'neutral': (255, 255, 0),   # Cyan
+            'sad': (255, 0, 0),         # Blue
+            'surprise': (255, 0, 255)   # Magenta
         }
+        self.emotion_colors = base_colors
         
-        self.class_names = class_names if class_names else ['happy', 'neutral', 'stressed']
+        # Default fallback if checkpoint doesn't have names
+        self.class_names = class_names if class_names else config.CLASS_NAMES
         self.model = self._load_model(model_path, num_classes)
         
         self.transform = transforms.Compose([

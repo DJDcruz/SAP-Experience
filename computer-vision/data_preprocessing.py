@@ -1,7 +1,10 @@
 import os
+from typing import List, Tuple
+
 import torch
 from torchvision import datasets, transforms
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset
+
 import config
 
 def get_transforms():
@@ -32,65 +35,74 @@ def get_transforms():
 
     return train_transforms, val_transforms
 
+
+def _split_indices(dataset_size: int, val_split: float) -> Tuple[List[int], List[int]]:
+    """Split dataset indices into train/validation sets."""
+    if dataset_size == 0:
+        return [], []
+
+    if dataset_size == 1:
+        return [0], []
+
+    val_size = max(1, int(dataset_size * val_split))
+    if val_size >= dataset_size:
+        val_size = dataset_size - 1
+
+    generator = torch.Generator().manual_seed(config.RANDOM_SEED)
+    indices = torch.randperm(dataset_size, generator=generator).tolist()
+    val_indices = indices[:val_size]
+    train_indices = indices[val_size:]
+
+    return train_indices, val_indices
+
+
 def get_data_loaders(data_dir=config.DATA_DIR, batch_size=config.BATCH_SIZE, num_workers=config.NUM_WORKERS):
-    """
-    Creates DataLoaders for train, validation, and test sets.
-    Assumes standard ImageFolder structure:
-    root/
-        class_x/
-            xxx.png
-        class_y/
-            yyy.png
-    """
-    if not os.path.exists(data_dir):
-        # specific instructions if folder is missing
-        print(f"Dataset directory not found at {data_dir}. Please create it and add class folders with images.")
-        return None, None, None
+    """Create DataLoaders for ImageFolder-based datasets."""
+    train_dir = config.TRAIN_DIR
+    test_dir = config.TEST_DIR
+
+    if not os.path.isdir(train_dir) or not os.path.isdir(test_dir):
+        print(f"Dataset folders not found. Expected '{train_dir}' and '{test_dir}'.")
+        return None, None, None, None
 
     train_trans, val_trans = get_transforms()
-    
-    # Load entire dataset
-    full_dataset = datasets.ImageFolder(root=data_dir, transform=train_trans)
-    
-    # Split into train (80%), val (10%), test (10%)
-    total_size = len(full_dataset)
-    train_size = int(0.8 * total_size)
-    val_size = int(0.1 * total_size)
-    test_size = total_size - train_size - val_size
-    
-    train_dataset, val_dataset, test_dataset = random_split(
-        full_dataset, [train_size, val_size, test_size]
-    )
-    
-    # Apply validation transforms to val/test sets (allows deterministic eval)
-    val_dataset.dataset.transform = val_trans
-    test_dataset.dataset.transform = val_trans
 
-    print(f"Dataset loaded: {total_size} images total.")
-    print(f"Train: {train_size}, Val: {val_size}, Test: {test_size}")
-    print(f"Classes: {full_dataset.classes}")
+    base_train_dataset = datasets.ImageFolder(train_dir)
+    class_names = base_train_dataset.classes
+    train_indices, val_indices = _split_indices(len(base_train_dataset), config.VAL_SPLIT)
+
+    # Apply transforms after splitting to avoid augmenting validation set
+    train_dataset = Subset(datasets.ImageFolder(train_dir, transform=train_trans), train_indices)
+    val_dataset = Subset(datasets.ImageFolder(train_dir, transform=val_trans), val_indices)
+    test_dataset = datasets.ImageFolder(test_dir, transform=val_trans)
+
+    print("Dataset Stats:")
+    print(f"  Train samples: {len(train_dataset)}")
+    print(f"  Val samples:   {len(val_dataset)}")
+    print(f"  Test samples:  {len(test_dataset)}")
+    print(f"  Classes:       {class_names}")
 
     train_loader = DataLoader(
-        train_dataset, 
-        batch_size=batch_size, 
-        shuffle=True, 
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
         num_workers=num_workers,
         pin_memory=True
     )
-    
+
     val_loader = DataLoader(
-        val_dataset, 
-        batch_size=batch_size, 
-        shuffle=False, 
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
         num_workers=num_workers,
         pin_memory=True
     )
-    
+
     test_loader = DataLoader(
-        test_dataset, 
-        batch_size=batch_size, 
-        shuffle=False, 
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
         num_workers=num_workers
     )
-    
-    return train_loader, val_loader, test_loader, full_dataset.classes
+
+    return train_loader, val_loader, test_loader, class_names
