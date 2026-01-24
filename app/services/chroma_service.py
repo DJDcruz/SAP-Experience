@@ -86,11 +86,13 @@ def build_context_from_chroma(chroma_manager: ChromaManager,
         - All text, explanations, and formatting must be in {language_name}.
         - Do not mix languages - use only {language_name} throughout your response.
 
-        CONVERSATION CONTEXT:
+        CONVERSATION CONTINUITY:
         - You are having an ongoing conversation with this passenger.
+        - IMPORTANT: Pay close attention to the conversation history below.
+        - If the passenger sends a short reply like "yes", "no", "sure", "tell me more", "that sounds good", etc., look at YOUR PREVIOUS RESPONSE to understand what they're responding to.
         - Reference previous messages when relevant to provide continuity.
-        - If they ask follow-up questions, use context from earlier in the conversation.
         - Address them warmly as a returning conversationalist.
+        {conversation_context}
 
         IMPORTANT INSTRUCTIONS:
         - If query is not related to travel, culture, language, destination, politely inform the passenger that you can only assist with travel-related questions.
@@ -111,7 +113,6 @@ def build_context_from_chroma(chroma_manager: ChromaManager,
         - Format your response in Markdown for better readability
 
         {kb_section}
-        {conversation_context}
 
         INSTRUCTIONS FOR RESPONSES:
         - Be warm and welcoming but keep responses concise 

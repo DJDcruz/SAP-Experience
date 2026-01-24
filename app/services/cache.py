@@ -116,13 +116,14 @@ class ConversationHistory:
         if not history:
             return ""
         
-        formatted_lines = ["\nPREVIOUS CONVERSATION:"]
+        formatted_lines = ["\n--- CONVERSATION HISTORY (use this to understand follow-up questions) ---"]
         for msg in history:
-            role = "Passenger" if msg['role'] == 'user' else "Assistant"
+            role = "PASSENGER" if msg['role'] == 'user' else "YOUR PREVIOUS RESPONSE"
             # Truncate long messages in history to save context
             content = msg['content'][:500] + "..." if len(msg['content']) > 500 else msg['content']
-            formatted_lines.append(f"{role}: {content}")
-        formatted_lines.append("\nCONTINUE THE CONVERSATION:")
+            formatted_lines.append(f"[{role}]: {content}")
+        formatted_lines.append("--- END OF CONVERSATION HISTORY ---")
+        formatted_lines.append("\nIMPORTANT: If the passenger's new message is a short reply like 'yes', 'no', 'sure', 'tell me more', etc., refer to YOUR PREVIOUS RESPONSE above to understand what they are responding to.\n")
         
         return "\n".join(formatted_lines)
     
