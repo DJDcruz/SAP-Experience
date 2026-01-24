@@ -56,7 +56,7 @@ async def lifespan(app: FastAPI):
     
     # Print network access info
     hostname = socket.gethostname()
-    local_ip = "192.168.0.179"
+    local_ip = "192.168.0.113"
     print(f"\n{'='*60}")
     print(f"🚀 Travel Assistant Started!")
     print(f"{'='*60}")
@@ -203,7 +203,16 @@ async def handle_query(request: QueryRequest):
             if kb_docs:
                 kb_lines = [f"- {d}" for d in kb_docs]
                 kb_section = "\n\nKNOWLEDGE BASE:\n" + "\n\n".join(kb_lines)
-                context_prompt = f"You are a helpful travel assistant. You MUST respond entirely in {language_name}.\n\n{kb_section}\n{conv_context}\n\nPASSENGER MESSAGE:\n"
+                context_prompt = f"""You are a helpful travel assistant. You MUST respond entirely in {language_name}.
+
+CONVERSATION CONTINUITY:
+- If the passenger sends a short reply like "yes", "no", "sure", "tell me more", look at the conversation history to understand what they're responding to.
+{conv_context}
+
+{kb_section}
+
+PASSENGER MESSAGE:
+"""
         except Exception as e:
             print(f"KB lookup failed: {e}")
 
