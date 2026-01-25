@@ -198,10 +198,17 @@ async def handle_query(request: QueryRequest):
 
     if not context_prompt and chroma_manager:
         try:
-            # Use English query for fallback search too
-            kb_docs = chroma_manager.query(query_english, top_k=3)
+            # Use filtered search with destination for better relevance
+            kb_docs = chroma_manager.query(query_english, top_k=3, destination=request.destination)
             if kb_docs:
-                kb_lines = [f"- {d}" for d in kb_docs]
+                kb_lines = []
+                for d in kb_docs:
+                    if isinstance(d, dict):
+                        title = d.get('title', 'Source')
+                        content = d.get('content') or d.get('text') or str(d)
+                        kb_lines.append(f"**{title}**:\n{content[:1024]}")
+                    else:
+                        kb_lines.append(f"- {d}")
                 kb_section = "\n\nKNOWLEDGE BASE:\n" + "\n\n".join(kb_lines)
                 context_prompt = f"""You are a helpful travel assistant. You MUST respond entirely in {language_name}.
 
@@ -332,10 +339,33 @@ async def crew_websocket_endpoint(websocket: WebSocket):
         crew_manager.disconnect(websocket)
 
 
+@app.get("/api/crew/alerts")
+async def get_crew_alerts():
+    """Get all stored crew alerts."""
+    return crew_manager.get_alerts()
+
+
 @app.post("/api/crew/acknowledge")
 async def acknowledge_crew_alert(request: dict):
     """Acknowledge a crew alert."""
-    return {"status": "success", "message": "Alert acknowledged"}
+    alert_id = request.get('alertId')
+    if alert_id is not None:
+        success = crew_manager.acknowledge_alert(alert_id)
+        if success:
+            return {"status": "success", "message": "Alert acknowledged"}
+        return {"status": "not_found", "message": "Alert not found"}
+    return {"status": "error", "message": "No alertId provided"}
+
+
+@app.delete("/api/crew/alerts")
+async def clear_crew_alerts(acknowledged_only: bool = True):
+    """Clear crew alerts. By default only clears acknowledged alerts."""
+    if acknowledged_only:
+        count = crew_manager.clear_acknowledged()
+        return {"status": "success", "message": f"Cleared {count} acknowledged alerts"}
+    else:
+        count = crew_manager.clear_all_alerts()
+        return {"status": "success", "message": f"Cleared all {count} alerts"}
 
 
 # =============================================================================
@@ -344,7 +374,7 @@ async def acknowledge_crew_alert(request: dict):
 
 if __name__ == "__main__":
     uvicorn.run(
-        "travel_assistant:app",
+        "main:app",
         host="0.0.0.0", 
         port=8000,
         reload=True
