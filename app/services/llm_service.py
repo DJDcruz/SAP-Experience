@@ -30,7 +30,20 @@ SERVICE_TOOL = {
                     'description': 'Priority level. Use "high" for medical emergencies, "low" for entertainment, "medium" for everything else.'
                 }
             },
-            'required': ['service_type', 'details', 'priority']
+            
+        }
+    }
+}
+
+# Default fallback tool to prevent the model from inventing tools.
+DEFAULT_TOOL = {
+    'type': 'function',
+    'function': {
+        'name': 'default_tool',
+        'description': 'Fallback tool. The model should select this when none of the service tools apply; indicates no crew action is needed.',
+        'parameters': {
+            'type': 'object',
+            'properties': {}
         }
     }
 }
@@ -87,24 +100,39 @@ class LlamaInterface:
         try:
             loop = asyncio.get_event_loop()
             
-            system_prompt = """You are Avia, an assistant on a flydubai aircraft in the air. You have NO knowledge about in-flight services or crew operations.
-Your job is to determine if the passenger needs an in-flight service from the cabin crew.
+            system_prompt = """You are Avia, a helpful assistant on a flydubai aircraft in the air. 
 
-ONLY use the request_service function if the passenger is asking for something the cabin crew can physically provide, such as:
+You CAN answer:
+- Questions about yourself (your name is Avia)
+- General conversation, greetings, and pleasantries
+- Travel information, destination tips, and cultural questions
+- Flight information, duration, and general aviation topics
+- Entertainment and casual chat
+
+You have NO knowledge about THIS SPECIFIC FLIGHT'S services, crew, or real-time operations.
+
+CRITICAL: ONLY use the request_service function when a passenger explicitly requests a physical item or crew assistance:
 - Beverages (water, coffee, tea, juice, soda, wine, beer)
 - Food (meals, snacks, sandwiches)
 - Comfort items (blanket, pillow)
-- Medical assistance (feeling sick, dizzy, need medication)
-- General crew assistance (help with seat, overhead bin)
-- Entertainment (headphones, WiFi issues, screen not working)
+- Medical assistance (feeling sick, need medication)
+- Crew help (seat adjustment, overhead bin, call button)
+- Entertainment hardware (headphones, screen issues)
 
-DO NOT use the function for:
-- Questions about destinations, travel tips, culture, or things to do
-- General conversation or greetings
-- Questions about flight duration, arrival time, or flight info
-- Any informational queries
+DO NOT use request_service for:
+- Questions or conversation (even about services)
+- "What's your name?" "How are you?" "Thank you" "Goodbye", or questions relating to YOU
+- "Tell me about Dubai" or any informational queries
+- Anything that doesn't require immediate crew action
 
-If unsure, DO NOT call the function - just respond normally."""
+DEFAULT BEHAVIOR: Answer directly. Only call the function when the passenger clearly wants something RIGHT NOW from the crew.
+
+Examples:
+User: "What's your name?" → Answer: "I'm Avia, your in-flight assistant!"
+User: "Can I get some water?" → Call: request_service("water")
+User: "What drinks are available?" → Answer: request_service("Information")
+User: "I'd like a coffee" → Call: request_service("coffee")
+"""
 
             messages = [
                 {'role': 'system', 'content': system_prompt},
@@ -116,8 +144,8 @@ If unsure, DO NOT call the function - just respond normally."""
                 lambda: self.client.chat(
                     model=self.model_name,
                     messages=messages,
-                    tools=[SERVICE_TOOL],
-                    options={"temperature": 0.1},
+                    tools=[SERVICE_TOOL, DEFAULT_TOOL],
+                    options={"temperature": 0.1, "num_ctx": 8192},
                     stream=False
                 )
             )
@@ -125,6 +153,8 @@ If unsure, DO NOT call the function - just respond normally."""
             # Check if model called the service tool
             if response.message.tool_calls:
                 tool_call = response.message.tool_calls[0]
+                # If the model selected the request_service tool, handle it.
+                # If it selected the default_tool or any other tool, treat as no-service.
                 if tool_call.function.name == 'request_service':
                     args = tool_call.function.arguments
                     print(f"🔧 Tool call detected: {args}")
@@ -167,6 +197,11 @@ If unsure, DO NOT call the function - just respond normally."""
                         'message': message
                     }
             
+                else:
+                    # Model chose default or another tool (fallback) — do not treat as service.
+                    print(f"[LLM Service] Non-service tool selected: {tool_call.function.name}; treating as no-service")
+                    return None
+
             return None
             
         except Exception as e:
