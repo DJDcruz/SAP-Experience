@@ -32,7 +32,6 @@ from services import (
     # Language
     get_language_name, get_service_message, translate_to_english,
     # Services
-    detect_service_request,
     crew_manager,
     build_context_from_chroma, init_chroma_manager, get_chroma_manager,
     init_llm,
@@ -56,7 +55,14 @@ async def lifespan(app: FastAPI):
     
     # Print network access info
     hostname = socket.gethostname()
-    local_ip = "192.168.0.113"
+    try:
+        # Get actual local IP by connecting to external address
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        local_ip = "127.0.0.1"
     print(f"\n{'='*60}")
     print(f"🚀 Travel Assistant Started!")
     print(f"{'='*60}")
@@ -133,26 +139,23 @@ async def handle_query(request: QueryRequest):
     # Get language name for responses
     language_name = get_language_name(request.language)
     
-    # First, check if this is a service request
-    service_request = detect_service_request(request.query)
+    # Use LLM function calling to detect service requests
+    service_request = await Llama.detect_service_with_tools(request.query, request.language)
     if service_request:
         alert = {
             'seatNumber': request.seatNumber,
             'serviceType': service_request['serviceType'],
-            'message': service_request['message'],
+            'message': request.query,  # Show the original passenger query
             'priority': service_request['priority'],
             'timestamp': datetime.now().isoformat()
         }
-        
         await crew_manager.broadcast(alert)
         print(f"🚨 Service request detected: {service_request['serviceType']} from seat {request.seatNumber}")
-        
         response_message = get_service_message(
             request.language, 
             service_request['serviceType'], 
             request.seatNumber
         )
-        
         return {
             "answer": response_message,
             "destination": request.destination,
