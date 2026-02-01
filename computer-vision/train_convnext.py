@@ -146,9 +146,11 @@ def main():
     if checkpoint_path:
         print(f"\n=== Fine-tuning from FER checkpoint ===")
         model = create_model(config.NUM_CLASSES, pretrained=False, load_from_checkpoint=checkpoint_path)
+        use_two_phase = config.FREEZE_BACKBONE_EPOCHS > 0
     else:
         print(f"\n=== Training from ImageNet pretrained weights ===")
         model = create_model(config.NUM_CLASSES, pretrained=config.PRETRAINED)
+        use_two_phase = False  # Standard training from scratch
     
     # 3. Setup Training Components
     criterion = nn.CrossEntropyLoss()
@@ -159,12 +161,49 @@ def main():
         
     print(f"\nStarting training on {config.DEVICE}")
     print(f"Total epochs: {config.NUM_EPOCHS}")
-    print(f"Frozen backbone epochs: {config.FREEZE_BACKBONE_EPOCHS}\n")
+    if use_two_phase:
+        print(f"Frozen backbone epochs: {config.FREEZE_BACKBONE_EPOCHS}\n")
+    else:
+        print("Training mode: Standard (all layers trainable)\n")
     
     best_acc = 0.0
     
+    # ============= STANDARD TRAINING (From Scratch or No Freezing) =============
+    if not use_two_phase:
+        print("="*60)
+        print("Standard Training (all layers trainable)")
+        print("="*60 + "\n")
+        
+        optimizer = optim.AdamW(model.parameters(), lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.NUM_EPOCHS)
+        scaler = torch.cuda.amp.GradScaler() if config.DEVICE.type == 'cuda' else None
+        
+        for epoch in range(config.NUM_EPOCHS):
+            print(f"\nEpoch {epoch+1}/{config.NUM_EPOCHS}")
+            
+            train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, scaler)
+            val_loss, val_acc = validate(model, val_loader, criterion)
+            
+            scheduler.step()
+            
+            print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
+            print(f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
+            
+            if val_acc > best_acc:
+                best_acc = val_acc
+                save_path = os.path.join(config.CHECKPOINT_DIR, config.BEST_MODEL_PATH)
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'accuracy': best_acc,
+                    'class_names': class_names
+                }, save_path)
+                print(f"Checkpointed best model to {save_path}")
+    
+    # ============= TWO-PHASE TRAINING (Fine-tuning with Frozen Backbone) =============
     # ============= PHASE 1: Frozen Backbone Training =============
-    if config.FREEZE_BACKBONE_EPOCHS > 0:
+    elif use_two_phase and config.FREEZE_BACKBONE_EPOCHS > 0:
         print("\n" + "="*60)
         print(f"PHASE 1: Training classifier only (frozen backbone)")
         print(f"Epochs: {config.FREEZE_BACKBONE_EPOCHS}")
@@ -204,60 +243,60 @@ def main():
                 }, save_path)
                 print(f"Checkpointed best model to {save_path}")
     
-    # ============= PHASE 2: Full Fine-tuning with Differential LR =============
-    remaining_epochs = config.NUM_EPOCHS - config.FREEZE_BACKBONE_EPOCHS
-    
-    if remaining_epochs > 0:
-        print("\n" + "="*60)
-        print(f"PHASE 2: Full fine-tuning (unfrozen backbone)")
-        print(f"Epochs: {remaining_epochs}")
-        print(f"Backbone LR: {config.BACKBONE_LR}, Classifier LR: {config.CLASSIFIER_LR}")
-        print("="*60 + "\n")
+        # ============= PHASE 2: Full Fine-tuning with Differential LR =============
+        remaining_epochs = config.NUM_EPOCHS - config.FREEZE_BACKBONE_EPOCHS
         
-        unfreeze_backbone(model)
-        
-        # Differential learning rates
-        backbone_params = []
-        classifier_params = []
-        
-        for name, param in model.named_parameters():
-            if 'classifier' in name:
-                classifier_params.append(param)
-            else:
-                backbone_params.append(param)
-        
-        optimizer = optim.AdamW([
-            {'params': backbone_params, 'lr': config.BACKBONE_LR},
-            {'params': classifier_params, 'lr': config.CLASSIFIER_LR}
-        ], weight_decay=config.WEIGHT_DECAY)
-        
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=remaining_epochs)
-        scaler = torch.cuda.amp.GradScaler() if config.DEVICE.type == 'cuda' else None
-        
-        for epoch in range(remaining_epochs):
-            current_epoch = config.FREEZE_BACKBONE_EPOCHS + epoch + 1
-            print(f"\nEpoch {current_epoch}/{config.NUM_EPOCHS}")
+        if remaining_epochs > 0:
+            print("\n" + "="*60)
+            print(f"PHASE 2: Full fine-tuning (unfrozen backbone)")
+            print(f"Epochs: {remaining_epochs}")
+            print(f"Backbone LR: {config.BACKBONE_LR}, Classifier LR: {config.CLASSIFIER_LR}")
+            print("="*60 + "\n")
             
-            train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, scaler)
-            val_loss, val_acc = validate(model, val_loader, criterion)
+            unfreeze_backbone(model)
             
-            scheduler.step()
+            # Differential learning rates
+            backbone_params = []
+            classifier_params = []
             
-            print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
-            print(f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
+            for name, param in model.named_parameters():
+                if 'classifier' in name:
+                    classifier_params.append(param)
+                else:
+                    backbone_params.append(param)
             
-            if val_acc > best_acc:
-                best_acc = val_acc
-                save_path = os.path.join(config.CHECKPOINT_DIR, "affectnet_" + config.BEST_MODEL_PATH)
-                torch.save({
-                    'epoch': current_epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'accuracy': best_acc,
-                    'class_names': class_names,
-                    'phase': 'unfrozen'
-                }, save_path)
-                print(f"Checkpointed best model to {save_path}")
+            optimizer = optim.AdamW([
+                {'params': backbone_params, 'lr': config.BACKBONE_LR},
+                {'params': classifier_params, 'lr': config.CLASSIFIER_LR}
+            ], weight_decay=config.WEIGHT_DECAY)
+            
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=remaining_epochs)
+            scaler = torch.cuda.amp.GradScaler() if config.DEVICE.type == 'cuda' else None
+            
+            for epoch in range(remaining_epochs):
+                current_epoch = config.FREEZE_BACKBONE_EPOCHS + epoch + 1
+                print(f"\nEpoch {current_epoch}/{config.NUM_EPOCHS}")
+                
+                train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, scaler)
+                val_loss, val_acc = validate(model, val_loader, criterion)
+                
+                scheduler.step()
+                
+                print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
+                print(f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
+                
+                if val_acc > best_acc:
+                    best_acc = val_acc
+                    save_path = os.path.join(config.CHECKPOINT_DIR, "affectnet_" + config.BEST_MODEL_PATH)
+                    torch.save({
+                        'epoch': current_epoch,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'accuracy': best_acc,
+                        'class_names': class_names,
+                        'phase': 'unfrozen'
+                    }, save_path)
+                    print(f"Checkpointed best model to {save_path}")
 
     print(f"\n{'='*60}")
     print(f"Training complete! Best validation accuracy: {best_acc:.2f}%")
