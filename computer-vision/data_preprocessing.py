@@ -26,17 +26,45 @@ def get_transforms():
     )
 
     train_transforms = transforms.Compose([
-        ConvertToRGB(),  # Handle both grayscale (FER2013) and RGB (AffectNet)
-        transforms.Resize(config.INPUT_SIZE),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(10),
-        transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1),
+        ConvertToRGB(),  
+        # Random resized crop: simulate varying distances and partial faces
+        transforms.RandomResizedCrop(config.INPUT_SIZE, scale=(0.7, 1.0), ratio=(0.9, 1.1)),
+        
+        # Random horizontal flip: faces are symmetric
+        transforms.RandomHorizontalFlip(p=0.5),
+        
+        # Random rotation: heads tilted to look up at elevated camera (15-30° angle)
+        transforms.RandomRotation(degrees=15),
+        
+        # Random affine: simulate head movement and slight distance changes
+        transforms.RandomAffine(
+            degrees=0,
+            translate=(0.1, 0.1),  # Horizontal/vertical shifts
+            scale=(0.9, 1.1),      # Zoom in/out
+        ),
+        
+        # Random perspective: critical for elevated camera angle (15-30° downward)
+        transforms.RandomPerspective(distortion_scale=0.2, p=0.5),
+        
+        # Color jitter: lighting variations in cabin environment
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.15, hue=0.05),
+        
+        # Random grayscale: helps bridge FER2013 (grayscale) and AffectNet (RGB) domain gap
+        transforms.RandomGrayscale(p=0.1),
+        
+        # Gaussian blur: simulate slight defocus at 1-2m distance
+        transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 0.5)),
+        
         transforms.ToTensor(),
+        
+        # Random erasing: simulate occlusions (hands, hair, objects)
+        transforms.RandomErasing(p=0.2, scale=(0.02, 0.15), ratio=(0.3, 3.3)),
+        
         normalize
     ])
 
     val_transforms = transforms.Compose([
-        ConvertToRGB(),  # Handle both grayscale (FER2013) and RGB (AffectNet)
+        ConvertToRGB(),  
         transforms.Resize(config.INPUT_SIZE),
         transforms.ToTensor(),
         normalize
@@ -65,10 +93,19 @@ def _split_indices(dataset_size: int, val_split: float) -> Tuple[List[int], List
     return train_indices, val_indices
 
 
-def get_data_loaders(data_dir=config.DATA_DIR, batch_size=config.BATCH_SIZE, num_workers=config.NUM_WORKERS):
-    """Create DataLoaders for ImageFolder-based datasets."""
-    train_dir = config.TRAIN_DIR
-    test_dir = config.TEST_DIR
+def get_data_loaders(data_dir=None, batch_size=config.BATCH_SIZE, num_workers=config.NUM_WORKERS):
+    """Create DataLoaders for ImageFolder-based datasets.
+    
+    Args:
+        data_dir: Base data directory. If None, uses config.DATA_DIR.
+        batch_size: Batch size for data loaders.
+        num_workers: Number of worker processes for data loading.
+    """
+    if data_dir is None:
+        data_dir = config.DATA_DIR
+    
+    train_dir = os.path.join(data_dir, "train")
+    test_dir = os.path.join(data_dir, "test")
 
     if not os.path.isdir(train_dir) or not os.path.isdir(test_dir):
         print(f"Dataset folders not found. Expected '{train_dir}' and '{test_dir}'.")
@@ -111,7 +148,8 @@ def get_data_loaders(data_dir=config.DATA_DIR, batch_size=config.BATCH_SIZE, num
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=num_workers
+        num_workers=num_workers,
+        pin_memory=True
     )
 
     return train_loader, val_loader, test_loader, class_names

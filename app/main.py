@@ -12,11 +12,17 @@ import os
 import socket
 from datetime import datetime
 from contextlib import asynccontextmanager
+import cv2
+import threading
+import numpy as np
+from pathlib import Path
+import time
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 import uvicorn
 
 # Add app directory to path for imports
@@ -44,37 +50,257 @@ from services import (
 Llama = init_llm()
 chroma_manager = init_chroma_manager(CHROMA_PERSIST_DIR)
 
+#============================================================================
+# CV STREAM PROCESSOR
+# =============================================================================
+
+# Global variables for video stream
+camera = None
+current_frame = None
+frame_lock = threading.Lock()
+
+class CVStreamProcessor:
+    def __init__(self, camera_index=0):
+        # Import CV modules
+        sys.path.insert(0, str(Path(__file__).parent.parent / "computer-vision"))
+        from mood_detection import FaceDetector
+        from seat_manager import SeatManager
+        
+        self.detector = FaceDetector()
+        self.cap = cv2.VideoCapture(camera_index)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        
+        # Get actual dimensions
+        self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        # Create seat manager and try to load calibration
+        self.seat_manager = SeatManager(
+            self.frame_width, 
+            self.frame_height,
+            auto_load_calibration=False
+        )
+        
+        calibration_path = Path(__file__).parent.parent / "computer-vision" / "seat_calibration.json"
+        if calibration_path.exists():
+            print(f"📍 Loading seat calibration from {calibration_path}")
+            if self.seat_manager.load_calibration(str(calibration_path)):
+                print(f"✅ Seat manager loaded with {len(self.seat_manager.seats)} seats")
+            else:
+                print(f"⚠️  Failed to load calibration, using default grid")
+                self.seat_manager._generate_grid_zones()
+        else:
+            print(f"⚠️  No calibration found at {calibration_path}, using default grid")
+            self.seat_manager._generate_grid_zones()
+        
+        self.emotion_update_interval = 0.3
+        self.last_emotion_update = time.time()
+        self.cached_emotions = {}
+        
+        self.running = False
+        self.thread = None
+    
+    def get_face_id(self, box):
+        """Create stable face IDs based on position"""
+        cx = int((box[0] + box[2]) / 2 / 50) * 50
+        cy = int((box[1] + box[3]) / 2 / 50) * 50
+        return f"{cx}_{cy}"
+    
+    def process_frame(self, frame):
+        """Process a single frame with face and emotion detection"""
+        boxes, probs, landmarks = self.detector.detect_faces(frame)
+        
+        emotions_list = []
+        seat_assignments = {}
+        seat_emotions = {}
+        current_time = time.time()
+        current_face_ids = set()
+        
+        if boxes is not None and len(boxes) > 0:
+            # Update seat assignments (pass frame for embedding extraction)
+            seat_assignments = self.seat_manager.update_seats(boxes, frame, current_time)
+            
+            # Update emotions if interval passed
+            if (current_time - self.last_emotion_update) > self.emotion_update_interval:
+                for i, box in enumerate(boxes):
+                    x1, y1, x2, y2 = box.astype(int)
+                    face_img = frame[max(0, y1):min(frame.shape[0], y2), 
+                                   max(0, x1):min(frame.shape[1], x2)]
+                    
+                    # Get landmarks for this face
+                    face_landmarks = None
+                    if landmarks is not None and i < len(landmarks) and landmarks[i] is not None:
+                        face_landmarks = landmarks[i].copy()
+                        face_landmarks[:, 0] -= x1
+                        face_landmarks[:, 1] -= y1
+                    
+                    if face_img.size > 0:
+                        emotion, conf, emotion_probs = self.detector.emotion_detector.detect_emotion(
+                            face_img, face_landmarks
+                        )
+                        face_id = self.get_face_id(box)
+                        self.cached_emotions[face_id] = (emotion, conf)
+                        current_face_ids.add(face_id)
+                        
+                        # Update seat manager with emotion
+                        for seat_id, (assigned_idx, _) in seat_assignments.items():
+                            if assigned_idx == i:
+                                self.seat_manager.update_seat_emotion(seat_id, emotion, conf, emotion_probs)
+                                seat_emotions[seat_id] = (emotion, conf)
+                
+                self.last_emotion_update = current_time
+            else:
+                # Use cached emotions
+                for box in boxes:
+                    current_face_ids.add(self.get_face_id(box))
+                
+                # Build seat_emotions from seat manager
+                for seat_id in seat_assignments.keys():
+                    seat = self.seat_manager.seats.get(seat_id)
+                    if seat and seat.current_emotion:
+                        seat_emotions[seat_id] = (seat.current_emotion, seat.current_confidence)
+            
+            # Build emotions list from cache for drawing
+            for box in boxes:
+                face_id = self.get_face_id(box)
+                if face_id in self.cached_emotions:
+                    emotions_list.append(self.cached_emotions[face_id])
+                else:
+                    emotions_list.append(None)
+            
+            # Clean up old faces
+            self.cached_emotions = {k: v for k, v in self.cached_emotions.items() 
+                                   if k in current_face_ids}
+        else:
+            # No faces detected - update seat manager with empty boxes
+            self.seat_manager.update_seats(None, frame, current_time)
+            self.cached_emotions.clear()
+        
+        # Draw detection boxes and seat assignments
+        frame = self.detector.draw_enhanced_boxes(
+            frame, boxes, probs, landmarks, 
+            seat_assignments=seat_assignments,
+            emotions=seat_emotions
+        )
+        
+        # Draw seat zones overlay
+        frame = self.seat_manager.draw_seat_zones(frame)
+        
+        frame = self.detector.add_dashboard(frame, boxes, probs)
+        
+        return frame
+    
+    def capture_loop(self):
+        """Continuous capture and processing loop"""
+        global current_frame
+        import time
+        
+        while self.running:
+            ret, frame = self.cap.read()
+            if not ret:
+                time.sleep(0.1)
+                continue
+            
+            # Process the frame
+            processed_frame = self.process_frame(frame)
+            
+            # Update global frame with thread safety
+            with frame_lock:
+                current_frame = processed_frame.copy()
+            
+            # Small sleep to prevent CPU overload
+            time.sleep(0.01)
+    
+    def start(self):
+        """Start the capture thread"""
+        self.running = True
+        self.thread = threading.Thread(target=self.capture_loop, daemon=True)
+        self.thread.start()
+        print("📹 CV Stream Processor started")
+    
+    def stop(self):
+        """Stop the capture thread"""
+        self.running = False
+        if self.thread:
+            self.thread.join()
+        self.cap.release()
+        print("📹 CV Stream Processor stopped")
+
+
+def generate_frames():
+    """Generator function for MJPEG stream"""
+    global current_frame
+    import time
+    
+    while True:
+        with frame_lock:
+            if current_frame is None:
+                # Send blank frame if no frame available
+                blank = np.zeros((480, 640, 3), dtype=np.uint8)
+                cv2.putText(blank, "Waiting for camera...", (180, 240),
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                frame = blank
+            else:
+                frame = current_frame.copy()
+        
+        # Encode frame as JPEG
+        ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ret:
+            continue
+        
+        # Yield frame in MJPEG format
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+        
+        # Control frame rate
+        time.sleep(0.033)  # ~30 fps
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handle startup and shutdown events."""
+    global camera
+    
     await init_db()
     
     # Create static directory if it doesn't exist
     os.makedirs(STATIC_DIR, exist_ok=True)
     
+    # Initialize CV Stream Processor
+    try:
+        camera = CVStreamProcessor(camera_index=0)
+        camera.start()
+    except Exception as e:
+        print(f"⚠️  CV Stream failed to start: {e}")
+        camera = None
+    
     # Print network access info
     hostname = socket.gethostname()
     try:
-        # Get actual local IP by connecting to external address
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
         local_ip = s.getsockname()[0]
         s.close()
     except Exception:
         local_ip = "127.0.0.1"
+    
     print(f"\n{'='*60}")
     print(f"🚀 Travel Assistant Started!")
     print(f"{'='*60}")
     print(f"📍 Local Access:    http://localhost:8000")
     print(f"🌐 Network Access:  http://{local_ip}:8000")
     print(f"📁 Static Files:    {STATIC_DIR}")
+    if camera:
+        print(f"📹 Video Stream:    http://localhost:8000/video_feed")
     print(f"{'='*60}\n")
     
     yield
     
+    # Cleanup
+    if camera:
+        camera.stop()
     print("Travel Assistant shutting down")
-
 
 # FastAPI Application
 app = FastAPI(
@@ -370,6 +596,51 @@ async def clear_crew_alerts(acknowledged_only: bool = True):
         count = crew_manager.clear_all_alerts()
         return {"status": "success", "message": f"Cleared all {count} alerts"}
 
+
+@app.get("/api/seats")
+async def get_seat_status():
+    """Get seat calibration data and current seat status."""
+    if camera is None or not hasattr(camera, 'seat_manager'):
+        return {
+            "error": "Camera or seat manager not available",
+            "seats": {}
+        }
+    
+    seat_manager = camera.seat_manager
+    seat_summary = seat_manager.get_seat_summary()
+    
+    # Add calibration zones
+    calibration_data = {
+        "frame_width": seat_manager.frame_width,
+        "frame_height": seat_manager.frame_height,
+        "seats": {}
+    }
+    
+    for seat_id, seat_state in seat_manager.seats.items():
+        calibration_data["seats"][seat_id] = {
+            "zone": list(seat_state.zone),
+            "polygon": [list(p) for p in seat_state.polygon] if seat_state.polygon else None,
+            "occupied": seat_summary[seat_id]["occupied"],
+            "emotion": seat_summary[seat_id]["emotion"],
+            "confidence": seat_state.current_confidence if seat_state.is_occupied else 0.0
+        }
+    
+    return calibration_data
+
+#=============================================================================
+# ROUTES - CV Video Stream
+# =============================================================================
+
+@app.get("/video_feed")
+async def video_feed():
+    """Video streaming route for CV emotion detection. Returns MJPEG stream."""
+    if camera is None:
+        raise HTTPException(status_code=503, detail="Camera not available")
+    
+    return StreamingResponse(
+        generate_frames(),
+        media_type="multipart/x-mixed-replace; boundary=frame"
+    )
 
 # =============================================================================
 # MAIN
