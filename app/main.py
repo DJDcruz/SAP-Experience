@@ -34,7 +34,7 @@ from services import (
     # Config
     STATIC_DIR, MODEL_NAME, CHROMA_PERSIST_DIR,
     # Models
-    QueryRequest, FeedbackRequest,
+    QueryRequest,
     # Language
     get_language_name, get_service_message, translate_to_english,
     # Services
@@ -42,7 +42,7 @@ from services import (
     build_context_from_chroma, init_chroma_manager, get_chroma_manager,
     init_llm,
     query_cache, conversation_history,
-    init_db, get_stats,
+    init_db, get_stats, log_query, log_conversation_message,
 )
 
 
@@ -382,6 +382,14 @@ async def handle_query(request: QueryRequest):
             service_request['serviceType'], 
             request.seatNumber
         )
+        # Persist conversation and query for auditing
+        try:
+            conversation_history.add_exchange(request.seatNumber, request.query, response_message)
+            await log_query(request.seatNumber, request.destination, request.query, response_message)
+            await log_conversation_message(request.seatNumber, 'user', request.query)
+            await log_conversation_message(request.seatNumber, 'assistant', response_message)
+        except Exception as e:
+            print(f"Error persisting service request conversation: {e}")
         return {
             "answer": response_message,
             "destination": request.destination,
@@ -403,6 +411,14 @@ async def handle_query(request: QueryRequest):
         if cached_response:
             # Store in conversation history even for cached responses
             conversation_history.add_exchange(request.seatNumber, request.query, cached_response)
+            # Persist to database
+            try:
+                await log_query(request.seatNumber, request.destination, request.query, cached_response)
+                await log_conversation_message(request.seatNumber, 'user', request.query)
+                await log_conversation_message(request.seatNumber, 'assistant', cached_response)
+            except Exception as e:
+                print(f"Error persisting cached conversation: {e}")
+
             ts = datetime.now().isoformat()
             print(f"[handle_query] cache hit - returning timestamp: {ts}")
             return {
@@ -466,6 +482,13 @@ PASSENGER MESSAGE:
     
     # Always store in conversation history
     conversation_history.add_exchange(request.seatNumber, request.query, answer)
+    # Persist to database
+    try:
+        await log_query(request.seatNumber, request.destination, request.query, answer)
+        await log_conversation_message(request.seatNumber, 'user', request.query)
+        await log_conversation_message(request.seatNumber, 'assistant', answer)
+    except Exception as e:
+        print(f"Error persisting conversation: {e}")
     
     ts = datetime.now().isoformat()
     print(f"[handle_query] model response - returning timestamp: {ts}")
@@ -478,14 +501,7 @@ PASSENGER MESSAGE:
     }
 
 
-@app.post("/api/feedback")
-async def submit_feedback(request: FeedbackRequest):
-    """Receive comfort feedback."""
-    return {
-        "status": "success",
-        "message": "Feedback received (not logged)",
-        "seatNumber": request.seatNumber
-    }
+# Comfort feedback endpoint removed
 
 
 @app.post("/api/crew-request")
