@@ -44,7 +44,7 @@ TRAIN_DIR = AFFECTNET_TRAIN_DIR
 TEST_DIR = AFFECTNET_TEST_DIR
 
 CHECKPOINT_DIR = "checkpoints"
-BEST_MODEL_PATH = "affectnet_best_convnext_base.pth"
+BEST_MODEL_PATH = "best_convnext_base.pth"
 FER_CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, "best_convnext_base.pth")  # Path to FER-trained model
 
 # Seat Configuration (for mood_detection.py)

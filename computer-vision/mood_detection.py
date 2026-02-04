@@ -49,7 +49,7 @@ def run_calibration(video_source, width, height, num_seats):
 
 
 class ConvNeXtEmotionDetector:
-    def __init__(self, model_path="checkpoints/affectnet_best_convnext_base.pth", num_classes=None, class_names=None):
+    def __init__(self, model_path="checkpoints/"+config.BEST_MODEL_PATH, num_classes=None, class_names=None):
         self.device = config.DEVICE
         num_classes = num_classes or getattr(config, 'NUM_CLASSES', 7)
         base_colors = {
@@ -217,7 +217,7 @@ class ConvNeXtEmotionDetector:
         return original_emotion, confidence, emotion_dict
 
 class FaceDetector:
-    def __init__(self, frame_width: int = 1280, frame_height: int = 720, use_seats: bool = True):
+    def __init__(self, frame_width: int = 1920, frame_height: int = 1080, use_seats: bool = True):
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         print(f"Using device: {device}")
         
@@ -395,8 +395,8 @@ class FaceDetector:
 def main():
     parser = argparse.ArgumentParser(description='Seat-Based Face Detection with Emotion Recognition')
     parser.add_argument('--video', type=str, default='0', help='Path to video file or camera index (default: 0 for camera)')
-    parser.add_argument('--width', type=int, default=1280, help='Frame width')
-    parser.add_argument('--height', type=int, default=720, help='Frame height')
+    parser.add_argument('--width', type=int, default=1920, help='Frame width')
+    parser.add_argument('--height', type=int, default=1080, help='Frame height')
     parser.add_argument('--calibrate', action='store_true', help='Run seat calibration before starting')
     parser.add_argument('--seats', type=int, default=4, help='Number of seats to calibrate')
     parser.add_argument('--no-seats', action='store_true', help='Disable seat-based tracking (just detect faces)')

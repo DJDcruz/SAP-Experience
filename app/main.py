@@ -17,6 +17,7 @@ import threading
 import numpy as np
 from pathlib import Path
 import time
+import asyncio
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -68,8 +69,8 @@ class CVStreamProcessor:
         
         self.detector = FaceDetector()
         self.cap = cv2.VideoCapture(camera_index)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
         
         # Get actual dimensions
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -98,8 +99,83 @@ class CVStreamProcessor:
         self.last_emotion_update = time.time()
         self.cached_emotions = {}
         
+        # Distress tracking: seat_id -> {'start_time': float, 'emotion': str, 'confidence': float, 'alerted': bool}
+        self.distress_tracking = {}
+        self.distress_threshold = 0.60  # 60% confidence
+        self.distress_duration = 5.0  # 5 seconds
+        self.distress_emotions = {'angry', 'sad'}  # Track anger and sadness
+        self.alert_cooldown = 30.0  # Don't spam alerts - wait 30s between alerts for same seat
+        self.last_alert_time = {}  # seat_id -> timestamp
+        
         self.running = False
         self.thread = None
+    
+    def check_distress(self, seat_id: str, emotion: str, confidence: float, current_time: float):
+        """Check if a seat shows prolonged distress (anger or sadness > 60% for ~5 seconds)."""
+        # Check if this emotion is a distress emotion and meets threshold
+        if emotion in self.distress_emotions and confidence >= self.distress_threshold:
+            if seat_id not in self.distress_tracking:
+                # Start tracking distress
+                self.distress_tracking[seat_id] = {
+                    'start_time': current_time,
+                    'emotion': emotion,
+                    'confidence': confidence,
+                    'alerted': False
+                }
+                print(f"⚠️  Seat {seat_id}: Started tracking {emotion} distress ({confidence:.1%})")
+            else:
+                # Update existing distress tracking
+                distress_info = self.distress_tracking[seat_id]
+                distress_info['emotion'] = emotion
+                distress_info['confidence'] = confidence
+                
+                # Check if distress has been sustained for required duration
+                duration = current_time - distress_info['start_time']
+                if duration >= self.distress_duration and not distress_info['alerted']:
+                    # Send alert
+                    self.send_distress_alert(seat_id, emotion, confidence, duration)
+                    distress_info['alerted'] = True
+        else:
+            # Emotion is not distress or below threshold - reset tracking
+            if seat_id in self.distress_tracking:
+                duration = current_time - self.distress_tracking[seat_id]['start_time']
+                print(f"✅ Seat {seat_id}: Distress cleared after {duration:.1f}s")
+                del self.distress_tracking[seat_id]
+    
+    def send_distress_alert(self, seat_id: str, emotion: str, confidence: float, duration: float):
+        """Send distress alert to crew dashboard."""
+        # Check cooldown to avoid spam
+        current_time = time.time()
+        if seat_id in self.last_alert_time:
+            time_since_last = current_time - self.last_alert_time[seat_id]
+            if time_since_last < self.alert_cooldown:
+                print(f"⏳ Seat {seat_id}: Alert on cooldown ({time_since_last:.1f}s / {self.alert_cooldown}s)")
+                return
+        
+        # Update last alert time
+        self.last_alert_time[seat_id] = current_time
+        
+        # Create alert message
+        alert = {
+            'seatNumber': seat_id,
+            'serviceType': 'DISTRESS',
+            'message': f'Passenger showing prolonged {emotion} ({confidence:.1%}) for {duration:.1f} seconds',
+            'priority': 'high',
+            'timestamp': datetime.now().isoformat(),
+            'emotion': emotion,
+            'confidence': confidence,
+            'duration': duration
+        }
+        
+
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(crew_manager.broadcast(alert))
+            loop.close()
+            print(f"🚨 DISTRESS ALERT: Seat {seat_id} - {emotion} ({confidence:.1%}) for {duration:.1f}s")
+        except Exception as e:
+            print(f"❌ Failed to send distress alert: {e}")
     
     def get_face_id(self, box):
         """Create stable face IDs based on position"""
@@ -148,6 +224,8 @@ class CVStreamProcessor:
                             if assigned_idx == i:
                                 self.seat_manager.update_seat_emotion(seat_id, emotion, conf, emotion_probs)
                                 seat_emotions[seat_id] = (emotion, conf)
+                                # Track distress for this seat
+                                self.check_distress(seat_id, emotion, conf, current_time)
                 
                 self.last_emotion_update = current_time
             else:
@@ -237,7 +315,7 @@ def generate_frames():
         with frame_lock:
             if current_frame is None:
                 # Send blank frame if no frame available
-                blank = np.zeros((480, 640, 3), dtype=np.uint8)
+                blank = np.zeros((1080, 1920, 3), dtype=np.uint8)
                 cv2.putText(blank, "Waiting for camera...", (180, 240),
                            cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
                 frame = blank
@@ -269,7 +347,7 @@ async def lifespan(app: FastAPI):
     
     # Initialize CV Stream Processor
     try:
-        camera = CVStreamProcessor(camera_index=0)
+        camera = CVStreamProcessor(camera_index=1)
         camera.start()
     except Exception as e:
         print(f"⚠️  CV Stream failed to start: {e}")
