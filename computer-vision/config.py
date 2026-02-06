@@ -57,3 +57,8 @@ SEAT_GRID_COLS = 2
 SEAT_VACANCY_TIMEOUT = 5.0  # Seconds before seat can be reassigned
 SEAT_EMBEDDING_THRESHOLD = 0.7  # Cosine similarity threshold for face re-ID
 SEAT_NAMES = ["1A", "1B", "2A", "2B"]  # Row-major order: top-left, top-right, bottom-left, bottom-right
+
+# Sleep Detection Configuration (MediaPipe EAR-based)
+EAR_THRESHOLD = 0.25        # Below this Eye Aspect Ratio, eyes are considered closed
+SLEEP_DURATION = 3.0        # Seconds of sustained eye closure to trigger sleeping state
+SLEEP_EMOTION_COLOR = (128, 128, 128)  # Gray color for sleeping overlay (BGR)

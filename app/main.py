@@ -64,8 +64,10 @@ class CVStreamProcessor:
         # Import CV modules
         sys.path.insert(0, str(Path(__file__).parent.parent / "computer-vision"))
         from mood_detection import FaceDetector
+        from sleep_detector import SleepDetector
         
         self.detector = FaceDetector()
+        self.sleep_detector = SleepDetector()
         self.cap = cv2.VideoCapture(camera_index)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
@@ -107,12 +109,24 @@ class CVStreamProcessor:
                         face_landmarks[:, 1] -= y1
                     
                     if face_img.size > 0:
-                        emotion, conf, emotion_probs = self.detector.emotion_detector.detect_emotion(
-                            face_img, face_landmarks
-                        )
-                        face_id = self.get_face_id(box)
-                        self.cached_emotions[face_id] = (emotion, conf)
-                        current_face_ids.add(face_id)
+                        # Check for sleeping via EAR before running ConvNeXt
+                        is_sleeping = False
+                        if self.sleep_detector.available:
+                            ear = self.sleep_detector.compute_ear(face_img)
+                            face_id = self.get_face_id(box)
+                            is_sleeping = self.sleep_detector.update(face_id, ear, current_time)
+                        
+                        if is_sleeping:
+                            face_id = self.get_face_id(box)
+                            self.cached_emotions[face_id] = ("sleeping", 1.0)
+                            current_face_ids.add(face_id)
+                        else:
+                            emotion, conf, emotion_probs = self.detector.emotion_detector.detect_emotion(
+                                face_img, face_landmarks
+                            )
+                            face_id = self.get_face_id(box)
+                            self.cached_emotions[face_id] = (emotion, conf)
+                            current_face_ids.add(face_id)
                 
                 self.last_emotion_update = current_time
             else:
@@ -127,11 +141,15 @@ class CVStreamProcessor:
                 else:
                     emotions_list.append(None)
             
-            # Clean up old faces
+            # Clean up old faces and sleep state
+            disappeared_ids = set(self.cached_emotions.keys()) - current_face_ids
+            for old_id in disappeared_ids:
+                self.sleep_detector.reset(old_id)
             self.cached_emotions = {k: v for k, v in self.cached_emotions.items() 
                                    if k in current_face_ids}
         else:
             self.cached_emotions.clear()
+            self.sleep_detector.reset_all()
         
         # Draw detection boxes and info
         frame = self.detector.draw_enhanced_boxes(frame, boxes, probs, landmarks, emotions_list)
