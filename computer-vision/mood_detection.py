@@ -51,7 +51,13 @@ def run_calibration(video_source, width, height, num_seats):
 
 
 class ConvNeXtEmotionDetector:
-    def __init__(self, model_path="checkpoints/best_convnext_base.pth", num_classes=None, class_names=None):
+    def __init__(self, model_path=None, num_classes=None, class_names=None):
+        # Use AffectNet fine-tuned model by default if available, otherwise fall back to FER
+        if model_path is None:
+            affectnet_path = os.path.join("checkpoints", getattr(config, 'AFFECTNET_MODEL_PATH', 'affectnet_best_convnext_base.pth'))
+            fer_path = os.path.join("checkpoints", config.BEST_MODEL_PATH)
+            model_path = affectnet_path if os.path.exists(affectnet_path) else fer_path
+        
         self.device = config.DEVICE
         num_classes = num_classes or getattr(config, 'NUM_CLASSES', 7)
         sleep_color = getattr(config, 'SLEEP_EMOTION_COLOR', (128, 128, 128))

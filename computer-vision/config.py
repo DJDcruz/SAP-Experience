@@ -23,7 +23,7 @@ CLASSIFIER_LR = 5e-5  # Higher learning rate for classifier head after unfreezin
 # Model Configuration
 NUM_CLASSES = 7
 CLASS_NAMES = ['angry', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise']
-MODEL_NAME = "convnext_tiny"
+MODEL_NAME = "convnext_base"
 PRETRAINED = True
 
 # Paths
@@ -48,8 +48,9 @@ TRAIN_DIR = FER_TRAIN_DIR
 TEST_DIR = FER_TEST_DIR
 
 CHECKPOINT_DIR = "checkpoints"
-BEST_MODEL_PATH = "best_convnext_base.pth"
-FER_CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, "best_convnext_tiny.pth")  # Path to FER-trained model
+BEST_MODEL_PATH = "best_convnext_base.pth"  # FER-only trained model
+AFFECTNET_MODEL_PATH = "affectnet_best_convnext_base.pth"  # AffectNet fine-tuned model
+FER_CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, BEST_MODEL_PATH)  # Path to FER-trained model for fine-tuning
 
 # Seat Configuration (for mood_detection.py)
 SEAT_GRID_ROWS = 2

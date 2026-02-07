@@ -8,13 +8,23 @@ duration triggers a 'sleeping' classification.
 """
 
 import numpy as np
+import os
+import urllib.request
 
 try:
-    import mediapipe as mp
+    from mediapipe.tasks import python as mp_python
+    from mediapipe.tasks.python import vision
+    mp = True
 except ImportError:
     mp = None
+    mp_python = None
+    vision = None
     print("Warning: mediapipe not installed. Sleep detection will be disabled.")
     print("Install with: pip install mediapipe")
+
+# Model download URL
+FACE_LANDMARKER_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+FACE_LANDMARKER_MODEL_PATH = os.path.join(os.path.dirname(__file__), "face_landmarker.task")
 
 # Try to import config for thresholds
 try:
@@ -82,13 +92,28 @@ class SleepDetector:
 
         # Initialize MediaPipe FaceMesh
         self._face_mesh = None
-        if mp is not None:
-            self._face_mesh = mp.solutions.face_mesh.FaceMesh(
-                static_image_mode=True,    # Each face crop is independent
-                max_num_faces=1,
-                refine_landmarks=True,
-                min_detection_confidence=0.5,
+        if mp is not None and vision is not None:
+            # Download model if not present
+            if not os.path.exists(FACE_LANDMARKER_MODEL_PATH):
+                print(f"Downloading face landmarker model to {FACE_LANDMARKER_MODEL_PATH}...")
+                try:
+                    urllib.request.urlretrieve(FACE_LANDMARKER_MODEL_URL, FACE_LANDMARKER_MODEL_PATH)
+                    print("Model downloaded successfully.")
+                except Exception as e:
+                    print(f"Failed to download face landmarker model: {e}")
+                    print("Sleep detection will be disabled.")
+                    return
+            
+            # MediaPipe 0.10+ uses tasks API
+            base_options = mp_python.BaseOptions(model_asset_path=FACE_LANDMARKER_MODEL_PATH)
+            options = vision.FaceLandmarkerOptions(
+                base_options=base_options,
+                num_faces=1,
+                min_face_detection_confidence=0.5,
+                output_face_blendshapes=False,
+                output_facial_transformation_matrixes=False
             )
+            self._face_mesh = vision.FaceLandmarker.create_from_options(options)
 
     @property
     def available(self):
@@ -113,18 +138,24 @@ class SleepDetector:
 
         import cv2
         rgb = cv2.cvtColor(face_crop_bgr, cv2.COLOR_BGR2RGB)
-        results = self._face_mesh.process(rgb)
+        
+        # Convert to MediaPipe Image format
+        from mediapipe import Image, ImageFormat
+        mp_image = Image(image_format=ImageFormat.SRGB, data=rgb)
+        
+        # Detect face landmarks
+        results = self._face_mesh.detect(mp_image)
 
-        if not results.multi_face_landmarks:
+        if not results.face_landmarks:
             return None
 
-        face_landmarks = results.multi_face_landmarks[0]
+        face_landmarks = results.face_landmarks[0]
         h, w = face_crop_bgr.shape[:2]
 
         def _get_points(indices):
             pts = []
             for idx in indices:
-                lm = face_landmarks.landmark[idx]
+                lm = face_landmarks[idx]
                 pts.append(np.array([lm.x * w, lm.y * h]))
             return np.array(pts)
 

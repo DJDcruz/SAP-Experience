@@ -16,22 +16,22 @@ GRAD_CLIP_MAX_NORM = 1.0
 
 def create_model(num_classes, pretrained=True, load_from_checkpoint=None):
     """
-    Initialize ConvNeXt-Tiny model.
+    Initialize ConvNeXt-Base model.
     Args:
         num_classes: Number of output classes
         pretrained: If True and load_from_checkpoint is None, load ImageNet weights
         load_from_checkpoint: Path to checkpoint file to load model weights from
     """
-    print(f"Initializing ConvNeXt-Tiny with {num_classes} output classes...")
+    print(f"Initializing ConvNeXt-Base with {num_classes} output classes...")
     
     # Load model with weights enum if available in newer torchvision
     try:
-        from torchvision.models import ConvNeXt_Tiny_Weights
-        weights = ConvNeXt_Tiny_Weights.DEFAULT if (pretrained and load_from_checkpoint is None) else None
-        model = models.convnext_tiny(weights=weights)
+        from torchvision.models import ConvNeXt_Base_Weights
+        weights = ConvNeXt_Base_Weights.DEFAULT if (pretrained and load_from_checkpoint is None) else None
+        model = models.convnext_base(weights=weights)
     except ImportError:
         # Fallback for older torchvision versions
-        model = models.convnext_tiny(pretrained=(pretrained and load_from_checkpoint is None))
+        model = models.convnext_base(pretrained=(pretrained and load_from_checkpoint is None))
     
     # Modify classifier for our number of classes
     # ConvNeXt's classifier is Sequential: [LayerNorm, Flatten, Linear]
@@ -141,25 +141,39 @@ def validate(model, loader, criterion):
     return running_loss / len(loader), 100. * correct / total
 
 def main():
-    # 1. Setup Data
-    print("Setting up data loaders...")
-    train_loader, val_loader, test_loader, class_names = get_data_loaders()
+    # 1. Determine training mode and dataset type
+    checkpoint_path = config.FER_CHECKPOINT_PATH if os.path.exists(config.FER_CHECKPOINT_PATH) else None
+    
+    if checkpoint_path:
+        # Fine-tuning on AffectNet
+        print("\n=== Fine-tuning from FER checkpoint ===")
+        dataset_type = 'affectnet'
+        deployment_mode = 'production'  # Change to 'demo' for classroom testing
+        use_two_phase = config.FREEZE_BACKBONE_EPOCHS > 0
+    else:
+        # Initial training on FER
+        print("\n=== Training from ImageNet pretrained weights ===")
+        dataset_type = 'fer'
+        deployment_mode = 'production'  # Not used for FER, but kept for consistency
+        use_two_phase = False
+    
+    # 2. Setup Data with appropriate augmentation strategy
+    print(f"Setting up data loaders for {dataset_type} dataset...")
+    train_loader, val_loader, test_loader, class_names = get_data_loaders(
+        dataset_type=dataset_type,
+        deployment_mode=deployment_mode
+    )
     
     if train_loader is None:
         return
 
-    # 2. Setup Model - Load from FER checkpoint if it exists
-    checkpoint_path = config.FER_CHECKPOINT_PATH if os.path.exists(config.FER_CHECKPOINT_PATH) else None
+    # 3. Setup Model
     if checkpoint_path:
-        print(f"\n=== Fine-tuning from FER checkpoint ===")
         model = create_model(config.NUM_CLASSES, pretrained=False, load_from_checkpoint=checkpoint_path)
-        use_two_phase = config.FREEZE_BACKBONE_EPOCHS > 0
     else:
-        print(f"\n=== Training from ImageNet pretrained weights ===")
         model = create_model(config.NUM_CLASSES, pretrained=config.PRETRAINED)
-        use_two_phase = False  # Standard training from scratch
     
-    # 3. Setup Training Components
+    # 4. Setup Training Components
     criterion = nn.CrossEntropyLoss()
     
     # Create checkpoint dir
