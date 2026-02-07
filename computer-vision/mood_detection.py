@@ -24,6 +24,9 @@ except ImportError:
 # Import seat manager from separate module
 from seat_manager import SeatManager, SeatState, SeatCalibrator, CALIBRATION_FILE, create_seat_manager_from_calibration
 
+# Import sleep detector
+from sleep_detector import SleepDetector
+
 
 def run_calibration(video_source, width, height, num_seats):
     """Run interactive seat calibration."""
@@ -49,9 +52,16 @@ def run_calibration(video_source, width, height, num_seats):
 
 
 class ConvNeXtEmotionDetector:
-    def __init__(self, model_path="checkpoints/affectnet_best_convnext_base.pth", num_classes=None, class_names=None):
+    def __init__(self, model_path=None, num_classes=None, class_names=None):
+        # Use AffectNet fine-tuned model by default if available, otherwise fall back to FER
+        if model_path is None:
+            affectnet_path = os.path.join("checkpoints", getattr(config, 'AFFECTNET_MODEL_PATH', 'affectnet_best_convnext_base.pth'))
+            fer_path = os.path.join("checkpoints", config.BEST_MODEL_PATH)
+            model_path = affectnet_path if os.path.exists(affectnet_path) else fer_path
+        
         self.device = config.DEVICE
         num_classes = num_classes or getattr(config, 'NUM_CLASSES', 7)
+        sleep_color = getattr(config, 'SLEEP_EMOTION_COLOR', (128, 128, 128))
         base_colors = {
             'angry': (0, 0, 255),       # Red
             'disgust': (0, 128, 0),     # Dark green
@@ -59,7 +69,8 @@ class ConvNeXtEmotionDetector:
             'happy': (0, 255, 0),       # Green
             'neutral': (255, 255, 0),   # Cyan
             'sad': (255, 0, 0),         # Blue
-            'surprise': (255, 0, 255)   # Magenta
+            'surprise': (255, 0, 255),  # Magenta
+            'sleeping': sleep_color     # Gray
         }
         self.emotion_colors = base_colors
     
@@ -84,7 +95,8 @@ class ConvNeXtEmotionDetector:
             'sad': 'distressed',
             'happy': 'happy',
             'neutral': 'neutral',
-            'surprise': 'surprise'
+            'surprise': 'surprise',
+            'sleeping': 'sleeping'
         }
         
         # Define colors for grouped emotions
@@ -92,7 +104,8 @@ class ConvNeXtEmotionDetector:
             'distressed': (0, 0, 255),    # Red for distress
             'happy': (0, 255, 0),         # Green
             'neutral': (255, 255, 0),     # Cyan
-            'surprise': (255, 0, 255)     # Magenta
+            'surprise': (255, 0, 255),    # Magenta
+            'sleeping': sleep_color       # Gray
         }
         
     def align_face(self, image, landmarks):
@@ -230,9 +243,15 @@ class FaceDetector:
         
         self.emotion_detector = ConvNeXtEmotionDetector()
         
-        # Initialize seat manager (optional)
-        self.use_seats = use_seats
-        self.seat_manager = SeatManager(frame_width, frame_height) if use_seats else None
+        # Initialize sleep detector
+        self.sleep_detector = SleepDetector()
+        if self.sleep_detector.available:
+            print("Sleep detection enabled (MediaPipe EAR)")
+        else:
+            print("Sleep detection disabled (mediapipe not installed)")
+        
+        # Initialize seat manager
+        self.seat_manager = SeatManager(frame_width, frame_height)
             
         self.fps_history = []
         self.face_history = {} 
@@ -487,93 +506,50 @@ def main():
         
         # Update emotions for assigned seats (or all faces if no seats)
         if (current_time - last_emotion_update) > emotion_update_interval:
-            if use_seats and seat_assignments:
-                for seat_id, (face_idx, box) in seat_assignments.items():
-                    x1, y1, x2, y2 = box.astype(int)
-                    face_img = frame[max(0, y1):min(frame.shape[0], y2), 
-                                    max(0, x1):min(frame.shape[1], x2)]
+            for seat_id, (face_idx, box) in seat_assignments.items():
+                x1, y1, x2, y2 = box.astype(int)
+                face_img = frame[max(0, y1):min(frame.shape[0], y2), 
+                                max(0, x1):min(frame.shape[1], x2)]
+                
+                if face_img.size > 0:
+                    # Check for sleeping via EAR before running ConvNeXt
+                    if detector.sleep_detector.available:
+                        ear = detector.sleep_detector.compute_ear(face_img)
+                        is_sleeping = detector.sleep_detector.update(seat_id, ear, current_time)
+                    else:
+                        is_sleeping = False
                     
-                    # Get landmarks for this face (if available)
-                    face_landmarks = None
-                    if landmarks is not None and face_idx < len(landmarks) and landmarks[face_idx] is not None:
-                        face_landmarks = landmarks[face_idx].copy()
-                        face_landmarks[:, 0] -= x1
-                        face_landmarks[:, 1] -= y1
-                    
-                    if face_img.size > 0:
-                        # Get raw emotion detection
-                        emotion, conf, emotion_probs = detector.emotion_detector.detect_emotion(face_img, face_landmarks)
-                        
-                        # Apply temporal smoothing
-                        classes = detector.emotion_detector.class_names
-                        prob_vec = np.array([emotion_probs.get(c, 0.0) for c in classes])
-                        
-                        if seat_id not in emotion_history:
-                            emotion_history[seat_id] = deque(maxlen=smoothing_window)
-                        emotion_history[seat_id].append(prob_vec)
-                        
-                        # Compute moving average
-                        avg_probs = np.mean(np.array(emotion_history[seat_id]), axis=0)
-                        smoothed_idx = int(np.argmax(avg_probs))
-                        smoothed_emotion = classes[smoothed_idx]
-                        smoothed_conf = float(avg_probs[smoothed_idx])
-                        smoothed_probs = {c: float(avg_probs[i]) for i, c in enumerate(classes)}
-                        
-                        seat_emotions[seat_id] = (smoothed_emotion, smoothed_conf)
-                        detector.seat_manager.update_seat_emotion(seat_id, smoothed_emotion, smoothed_conf, smoothed_probs)
-            else:
-                # No seats mode - detect emotions for all faces
-                if boxes is not None:
-                    for i, box in enumerate(boxes):
-                        x1, y1, x2, y2 = box.astype(int)
-                        face_img = frame[max(0, y1):min(frame.shape[0], y2), 
-                                        max(0, x1):min(frame.shape[1], x2)]
-                        
+                    if is_sleeping:
+                        # Override emotion with sleeping — skip ConvNeXt inference
+                        seat_emotions[seat_id] = ("sleeping", 1.0)
+                        detector.seat_manager.update_seat_emotion(
+                            seat_id, "sleeping", 1.0, {"sleeping": 1.0})
+                    else:
+                        # Normal ConvNeXt emotion detection
                         face_landmarks = None
-                        if landmarks is not None and i < len(landmarks) and landmarks[i] is not None:
-                            face_landmarks = landmarks[i].copy()
+                        if landmarks is not None and face_idx < len(landmarks) and landmarks[face_idx] is not None:
+                            face_landmarks = landmarks[face_idx].copy()
                             face_landmarks[:, 0] -= x1
                             face_landmarks[:, 1] -= y1
                         
-                        if face_img.size > 0:
-                            # Get raw emotion detection
-                            emotion, conf, emotion_probs = detector.emotion_detector.detect_emotion(face_img, face_landmarks)
-                            
-                            # Apply temporal smoothing
-                            classes = detector.emotion_detector.class_names
-                            prob_vec = np.array([emotion_probs.get(c, 0.0) for c in classes])
-                            
-                            if i not in emotion_history:
-                                emotion_history[i] = deque(maxlen=smoothing_window)
-                            emotion_history[i].append(prob_vec)
-                            
-                            # Compute moving average
-                            avg_probs = np.mean(np.array(emotion_history[i]), axis=0)
-                            smoothed_idx = int(np.argmax(avg_probs))
-                            smoothed_emotion = classes[smoothed_idx]
-                            smoothed_conf = float(avg_probs[smoothed_idx])
-                            
-                            seat_emotions[i] = (smoothed_emotion, smoothed_conf)  # Use face index as key
+                        emotion, conf, emotion_probs = detector.emotion_detector.detect_emotion(face_img, face_landmarks)
+                        seat_emotions[seat_id] = (emotion, conf)
+                        detector.seat_manager.update_seat_emotion(seat_id, emotion, conf, emotion_probs)
             
             last_emotion_update = current_time
         
-        # Clean up emotions for vacated seats (only in seat mode)
-        if use_seats and detector.seat_manager:
-            for seat_id in list(seat_emotions.keys()):
-                if seat_id in detector.seat_manager.seats and not detector.seat_manager.seats[seat_id].is_occupied:
-                    del seat_emotions[seat_id]
-            
-            # Draw seat zones first (background)
-            frame = detector.seat_manager.draw_seat_zones(frame)
+        # Clean up emotions and sleep state for vacated seats
+        for seat_id in list(seat_emotions.keys()):
+            if not detector.seat_manager.seats[seat_id].is_occupied:
+                del seat_emotions[seat_id]
+                detector.sleep_detector.reset(seat_id)
         
-        # Draw face boxes with seat assignments (or just faces if no seats)
-        if not use_seats and boxes is not None:
-            # In no-seats mode, create a simple emotions dict indexed by face
-            face_emotions = {i: seat_emotions.get(i) for i in range(len(boxes)) if i in seat_emotions}
-            frame = detector.draw_enhanced_boxes(frame, boxes, probs, landmarks, None, face_emotions)
-        else:
-            frame = detector.draw_enhanced_boxes(frame, boxes, probs, landmarks, 
-                                                 seat_assignments, seat_emotions)
+        # Draw seat zones first (background)
+        frame = detector.seat_manager.draw_seat_zones(frame)
+        
+        # Draw face boxes with seat assignments
+        frame = detector.draw_enhanced_boxes(frame, boxes, probs, landmarks, 
+                                             seat_assignments, seat_emotions)
         
         # Draw dashboard
         frame = detector.add_dashboard(frame, boxes, probs)
@@ -595,6 +571,7 @@ def main():
         elif key == ord('r') and use_seats:
             # Reset all seats
             detector.seat_manager.reset_all_seats()
+            detector.sleep_detector.reset_all()
             seat_emotions.clear()
             print("All seats reset")
         elif key == ord('c') and use_seats:
