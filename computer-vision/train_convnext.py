@@ -301,7 +301,12 @@ def main():
                 {'params': classifier_params, 'lr': config.CLASSIFIER_LR}
             ], weight_decay=config.WEIGHT_DECAY)
             
-            scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=remaining_epochs)
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, 
+                mode='max',           # maximize validation accuracy
+                factor=0.5,           # reduce LR by half
+                patience=3           # wait 3 epochs before reducing
+            )
             scaler = torch.amp.GradScaler('cuda') if config.DEVICE.type == 'cuda' else None
             epochs_without_improvement = 0  # Reset for Phase 2
             
@@ -312,7 +317,7 @@ def main():
                 train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, scaler)
                 val_loss, val_acc = validate(model, val_loader, criterion)
                 
-                scheduler.step()
+                scheduler.step(val_acc)
                 
                 print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
                 print(f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")

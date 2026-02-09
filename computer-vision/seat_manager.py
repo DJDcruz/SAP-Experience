@@ -89,7 +89,7 @@ class SeatManager:
         self.frame_height = frame_height
         self.rows = rows or getattr(config, 'SEAT_GRID_ROWS', 2)
         self.cols = cols or getattr(config, 'SEAT_GRID_COLS', 2)
-        self.vacancy_timeout = vacancy_timeout or getattr(config, 'SEAT_VACANCY_TIMEOUT', 5.0)
+        self.vacancy_timeout = vacancy_timeout or getattr(config, 'SEAT_VACANCY_TIMEOUT', 3.0)
         self.embedding_threshold = embedding_threshold or getattr(config, 'SEAT_EMBEDDING_THRESHOLD', 0.7)
         self.seat_names = getattr(config, 'SEAT_NAMES', None)
         self.calibration_file = calibration_file or CALIBRATION_FILE
@@ -770,8 +770,8 @@ def main():
     parser = argparse.ArgumentParser(description='Seat Manager Calibration Tool')
     parser.add_argument('--calibrate', action='store_true', help='Run interactive calibration')
     parser.add_argument('--video', type=str, default='0', help='Video source (camera index or file path)')
-    parser.add_argument('--width', type=int, default=1280, help='Frame width')
-    parser.add_argument('--height', type=int, default=720, help='Frame height')
+    parser.add_argument('--width', type=int, default=1920, help='Frame width')
+    parser.add_argument('--height', type=int, default=1080, help='Frame height')
     parser.add_argument('--seats', type=int, default=4, help='Number of seats to calibrate')
     parser.add_argument('--output', type=str, default=None, help='Output calibration file path')
     args = parser.parse_args()

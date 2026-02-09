@@ -17,6 +17,7 @@ import threading
 import numpy as np
 from pathlib import Path
 import time
+import asyncio
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,15 +35,15 @@ from services import (
     # Config
     STATIC_DIR, MODEL_NAME, CHROMA_PERSIST_DIR,
     # Models
-    QueryRequest, FeedbackRequest,
+    QueryRequest,
     # Language
-    get_language_name, get_service_message, translate_to_english,
+    get_language_name, get_service_message, translate_to_english, translate_to_language,
     # Services
     crew_manager,
-    build_context_from_chroma, init_chroma_manager, get_chroma_manager,
+    build_context_from_chroma, init_chroma_manager, get_chroma_manager, get_translated_prompt,
     init_llm,
     query_cache, conversation_history,
-    init_db, get_stats,
+    init_db, get_stats, log_query, log_conversation_message,
 )
 
 
@@ -71,8 +72,8 @@ class CVStreamProcessor:
         self.detector = FaceDetector()
         self.sleep_detector = SleepDetector()
         self.cap = cv2.VideoCapture(camera_index)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
         
         # Get actual dimensions
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -124,8 +125,83 @@ class CVStreamProcessor:
         self.last_emotion_update = time.time()
         self.cached_emotions = {}
         
+        # Distress tracking: seat_id -> {'start_time': float, 'emotion': str, 'confidence': float, 'alerted': bool}
+        self.distress_tracking = {}
+        self.distress_threshold = 0.60  # 60% confidence
+        self.distress_duration = 5.0  # 5 seconds
+        self.distress_emotions = {'angry', 'sad'}  # Track anger and sadness
+        self.alert_cooldown = 30.0  # Don't spam alerts - wait 30s between alerts for same seat
+        self.last_alert_time = {}  # seat_id -> timestamp
+        
         self.running = False
         self.thread = None
+    
+    def check_distress(self, seat_id: str, emotion: str, confidence: float, current_time: float):
+        """Check if a seat shows prolonged distress (anger or sadness > 60% for ~5 seconds)."""
+        # Check if this emotion is a distress emotion and meets threshold
+        if emotion in self.distress_emotions and confidence >= self.distress_threshold:
+            if seat_id not in self.distress_tracking:
+                # Start tracking distress
+                self.distress_tracking[seat_id] = {
+                    'start_time': current_time,
+                    'emotion': emotion,
+                    'confidence': confidence,
+                    'alerted': False
+                }
+                print(f"⚠️  Seat {seat_id}: Started tracking {emotion} distress ({confidence:.1%})")
+            else:
+                # Update existing distress tracking
+                distress_info = self.distress_tracking[seat_id]
+                distress_info['emotion'] = emotion
+                distress_info['confidence'] = confidence
+                
+                # Check if distress has been sustained for required duration
+                duration = current_time - distress_info['start_time']
+                if duration >= self.distress_duration and not distress_info['alerted']:
+                    # Send alert
+                    self.send_distress_alert(seat_id, emotion, confidence, duration)
+                    distress_info['alerted'] = True
+        else:
+            # Emotion is not distress or below threshold - reset tracking
+            if seat_id in self.distress_tracking:
+                duration = current_time - self.distress_tracking[seat_id]['start_time']
+                print(f"✅ Seat {seat_id}: Distress cleared after {duration:.1f}s")
+                del self.distress_tracking[seat_id]
+    
+    def send_distress_alert(self, seat_id: str, emotion: str, confidence: float, duration: float):
+        """Send distress alert to crew dashboard."""
+        # Check cooldown to avoid spam
+        current_time = time.time()
+        if seat_id in self.last_alert_time:
+            time_since_last = current_time - self.last_alert_time[seat_id]
+            if time_since_last < self.alert_cooldown:
+                print(f"⏳ Seat {seat_id}: Alert on cooldown ({time_since_last:.1f}s / {self.alert_cooldown}s)")
+                return
+        
+        # Update last alert time
+        self.last_alert_time[seat_id] = current_time
+        
+        # Create alert message
+        alert = {
+            'seatNumber': seat_id,
+            'serviceType': 'DISTRESS',
+            'message': f'Passenger showing prolonged {emotion} ({confidence:.1%}) for {duration:.1f} seconds',
+            'priority': 'high',
+            'timestamp': datetime.now().isoformat(),
+            'emotion': emotion,
+            'confidence': confidence,
+            'duration': duration
+        }
+        
+
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(crew_manager.broadcast(alert))
+            loop.close()
+            print(f"🚨 DISTRESS ALERT: Seat {seat_id} - {emotion} ({confidence:.1%}) for {duration:.1f}s")
+        except Exception as e:
+            print(f"❌ Failed to send distress alert: {e}")
     
     def get_face_id(self, box):
         """Create stable face IDs based on position"""
@@ -177,6 +253,8 @@ class CVStreamProcessor:
                             if assigned_idx == i:
                                 self.seat_manager.update_seat_emotion(seat_id, emotion, conf, emotion_probs)
                                 seat_emotions[seat_id] = (emotion, conf)
+                                # Track distress for this seat
+                                self.check_distress(seat_id, emotion, conf, current_time)
                 
                 self.last_emotion_update = current_time
             else:
@@ -289,7 +367,7 @@ def generate_frames():
         with frame_lock:
             if current_frame is None:
                 # Send blank frame if no frame available
-                blank = np.zeros((480, 640, 3), dtype=np.uint8)
+                blank = np.zeros((1080, 1920, 3), dtype=np.uint8)
                 cv2.putText(blank, "Waiting for camera...", (180, 240),
                            cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
                 frame = blank
@@ -321,7 +399,7 @@ async def lifespan(app: FastAPI):
     
     # Initialize CV Stream Processor
     try:
-        camera = CVStreamProcessor(camera_index=0)
+        camera = CVStreamProcessor(camera_index=1)
         camera.start()
     except Exception as e:
         print(f"⚠️  CV Stream failed to start: {e}")
@@ -410,6 +488,19 @@ async def health_check():
     }
 
 
+@app.post("/api/translate")
+async def translate_text(request: dict):
+    """Translate text to target language."""
+    text = request.get('text', '')
+    target_language = request.get('language', 'en')
+    
+    if not text:
+        raise HTTPException(status_code=400, detail="Text is required")
+    
+    translated = await translate_to_language(text, target_language, Llama)
+    return {"translated": translated}
+
+
 @app.post("/api/query")
 async def handle_query(request: QueryRequest):
     """Handle passenger query with destination context."""
@@ -420,25 +511,13 @@ async def handle_query(request: QueryRequest):
     # Use LLM function calling to detect service requests
     service_request = await Llama.detect_service_with_tools(request.query, request.language)
     if service_request:
-        alert = {
-            'seatNumber': request.seatNumber,
-            'serviceType': service_request['serviceType'],
-            'message': request.query,  # Show the original passenger query
-            'priority': service_request['priority'],
-            'timestamp': datetime.now().isoformat()
-        }
-        await crew_manager.broadcast(alert)
-        print(f"🚨 Service request detected: {service_request['serviceType']} from seat {request.seatNumber}")
-        response_message = get_service_message(
-            request.language, 
-            service_request['serviceType'], 
-            request.seatNumber
-        )
+        # Return service detection info without auto-sending
+        print(f"🔔 Service request detected: {service_request['serviceType']} from seat {request.seatNumber} (pending confirmation)")
         return {
-            "answer": response_message,
-            "destination": request.destination,
-            "from_cache": False,
-            "service_alert_sent": True,
+            "service_detected": True,
+            "service_type": service_request['serviceType'],
+            "priority": service_request['priority'],
+            "original_query": request.query,
             "timestamp": datetime.now().isoformat()
         }
     
@@ -455,6 +534,14 @@ async def handle_query(request: QueryRequest):
         if cached_response:
             # Store in conversation history even for cached responses
             conversation_history.add_exchange(request.seatNumber, request.query, cached_response)
+            # Persist to database
+            try:
+                await log_query(request.seatNumber, request.destination, request.query, cached_response)
+                await log_conversation_message(request.seatNumber, 'user', request.query)
+                await log_conversation_message(request.seatNumber, 'assistant', cached_response)
+            except Exception as e:
+                print(f"Error persisting cached conversation: {e}")
+
             ts = datetime.now().isoformat()
             print(f"[handle_query] cache hit - returning timestamp: {ts}")
             return {
@@ -490,24 +577,17 @@ async def handle_query(request: QueryRequest):
                         kb_lines.append(f"**{title}**:\n{content[:1024]}")
                     else:
                         kb_lines.append(f"- {d}")
-                kb_section = "\n\nKNOWLEDGE BASE:\n" + "\n\n".join(kb_lines)
-                context_prompt = f"""You are a helpful travel assistant. You MUST respond entirely in {language_name}.
-
-CONVERSATION CONTINUITY:
-- If the passenger sends a short reply like "yes", "no", "sure", "tell me more", look at the conversation history to understand what they're responding to.
-{conv_context}
-
-{kb_section}
-
-PASSENGER MESSAGE:
-"""
+                kb_section = "\n\n".join(kb_lines)
+                conv_section = conv_context if conv_context else ""
+                # Use fully translated prompt
+                context_prompt = get_translated_prompt(request.language, conv_section, kb_section)
         except Exception as e:
             print(f"KB lookup failed: {e}")
 
     if not context_prompt:
         raise HTTPException(status_code=400, detail=f"No knowledge base entries found for '{request.destination}' and no fallback available.")
 
-    full_prompt = f"{context_prompt}\n\n{request.query}\n\nAnswer (in {language_name}):"
+    full_prompt = f"{context_prompt}\n\n{request.query}\n\n## YOUR RESPONSE (in {language_name} only):"
     
     print(f"🤖 Querying for: {request.query[:50]}...")
     answer = await Llama.generate_response(full_prompt)
@@ -518,6 +598,13 @@ PASSENGER MESSAGE:
     
     # Always store in conversation history
     conversation_history.add_exchange(request.seatNumber, request.query, answer)
+    # Persist to database
+    try:
+        await log_query(request.seatNumber, request.destination, request.query, answer)
+        await log_conversation_message(request.seatNumber, 'user', request.query)
+        await log_conversation_message(request.seatNumber, 'assistant', answer)
+    except Exception as e:
+        print(f"Error persisting conversation: {e}")
     
     ts = datetime.now().isoformat()
     print(f"[handle_query] model response - returning timestamp: {ts}")
@@ -529,24 +616,50 @@ PASSENGER MESSAGE:
         "timestamp": ts
     }
 
-
-@app.post("/api/feedback")
-async def submit_feedback(request: FeedbackRequest):
-    """Receive comfort feedback."""
-    return {
-        "status": "success",
-        "message": "Feedback received (not logged)",
-        "seatNumber": request.seatNumber
+@app.post("/api/service-request")
+async def send_service_request(request: QueryRequest):
+    """Send a confirmed service request to crew."""
+    # Re-detect to get service type (or accept it from frontend)
+    service_request = await Llama.detect_service_with_tools(request.query, request.language)
+    
+    if not service_request:
+        raise HTTPException(status_code=400, detail="No service request detected")
+    
+    # Translate message to English for crew dashboard
+    message_english = await translate_to_english(request.query, request.language, Llama)
+    
+    # Create and broadcast alert (with English translation)
+    alert = {
+        'seatNumber': request.seatNumber,
+        'serviceType': service_request['serviceType'],
+        'message': message_english,
+        'priority': service_request['priority'],
+        'timestamp': datetime.now().isoformat()
     }
-
-
-@app.post("/api/crew-request")
-async def crew_request(request: QueryRequest):
-    """Passenger requests crew assistance."""
+    await crew_manager.broadcast(alert)
+    print(f"🚨 Service request sent: {service_request['serviceType']} from seat {request.seatNumber}")
+    
+    # Get confirmation message
+    response_message = get_service_message(
+        request.language, 
+        service_request['serviceType'], 
+        request.seatNumber
+    )
+    
+    # Persist conversation and query
+    try:
+        conversation_history.add_exchange(request.seatNumber, request.query, response_message)
+        await log_query(request.seatNumber, request.destination, request.query, response_message)
+        await log_conversation_message(request.seatNumber, 'user', request.query)
+        await log_conversation_message(request.seatNumber, 'assistant', response_message)
+    except Exception as e:
+        print(f"Error persisting service request conversation: {e}")
+    
     return {
-        "status": "success",
-        "message": "Crew request submitted (not logged)",
-        "seatNumber": request.seatNumber
+        "answer": response_message,
+        "destination": request.destination,
+        "service_alert_sent": True,
+        "timestamp": datetime.now().isoformat()
     }
 
 

@@ -4,7 +4,7 @@ import os
 import chromadb
 from sentence_transformers import SentenceTransformer
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List, Dict
 
 # Enable offline mode for HuggingFace - use cached models only
 os.environ["HF_HUB_OFFLINE"] = "1"
@@ -269,91 +269,3 @@ class ChromaDBManager:
             })
         
         return search_results
-    
-    def persist(self):
-        """Persist the collection to disk"""
-        # No longer needed in Chroma v1.0.0+ - writes are saved instantly
-        pass
-
-
-class TravelChatBot:
-    """Offline travel assistant chatbot using ChromaDB"""
-    
-    def __init__(self, db_manager: ChromaDBManager):
-        self.db = db_manager
-        self.conversation_history = []
-    
-    def generate_response(self, user_query: str, n_context: int = 3) -> Dict:
-        """Generate response with retrieved context"""
-        
-        # Search for relevant content
-        context_docs = self.db.search(user_query, n_results=n_context)
-        
-        if not context_docs:
-            return {
-                'query': user_query,
-                'response': "I couldn't find relevant travel information for your query. Try asking about destinations, attractions, getting around, or local tips.",
-                'sources': [],
-                'context_used': 0
-            }
-        
-        # Build context string
-        context = "\n\n---\n\n".join([
-            f"**{doc['title']}**:\n{doc['content'][:500]}..." 
-            if len(doc['content']) > 500 
-            else f"**{doc['title']}**:\n{doc['content']}"
-            for doc in context_docs
-        ])
-        
-        # Generate response prompt
-        prompt = f"""You are a helpful travel assistant with knowledge about global destinations.
-        
-Based on the following travel information, answer the user's question concisely and helpfully:
-
----CONTEXT---
-{context}
----END CONTEXT---
-
-User Question: {user_query}
-
-Answer:"""
-        
-        # Simple response generation (in production, use an LLM)
-        response = self._generate_simple_response(user_query, context_docs)
-        
-        return {
-            'query': user_query,
-            'response': response,
-            'sources': list(set([doc['title'] for doc in context_docs])),
-            'context_used': len(context_docs)
-        }
-    
-    def _generate_simple_response(self, query: str, docs: List[Dict]) -> str:
-        """Simple response generation without LLM (for offline use)"""
-        
-        # Extract key info from relevant documents
-        response_parts = []
-        
-        for doc in docs:
-            # Check if document is relevant
-            content = doc['content'][:800]  # First 800 chars
-            response_parts.append(f"From **{doc['title']}**:\n{content}")
-        
-        # For full LLM integration, use ollama or similar:
-        # from ollama import generate
-        # response = generate(model='mistral', prompt=prompt)
-        
-        combined = "\n\n".join(response_parts)
-        return f"Based on WikiVoyage information:\n\n{combined}"
-    
-    def chat(self, user_input: str) -> str:
-        """Interactive chat interface"""
-        result = self.generate_response(user_input)
-        self.conversation_history.append({
-            'user': user_input,
-            'bot': result
-        })
-        return result
-
-
-# module provides WikiVoyageProcessor, ChromaDBManager and TravelChatBot for import/use
