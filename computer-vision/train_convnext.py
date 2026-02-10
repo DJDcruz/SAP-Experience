@@ -5,16 +5,55 @@ from torchvision import models
 from tqdm import tqdm
 import os
 import time
+from copy import deepcopy
 
 # Local imports
 import config
-from data_preprocessing import get_data_loaders
+from data_preprocessing import get_data_loaders, compute_class_weights, mixup_data, mixup_criterion
+from attention import CoordinateAttention
 
 # Early stopping configuration
 EARLY_STOPPING_PATIENCE = 7
 GRAD_CLIP_MAX_NORM = 1.0
 
-def create_model(num_classes, pretrained=True, load_from_checkpoint=None):
+
+class ModelEMA:
+    """
+    Exponential Moving Average (EMA) of model weights.
+    Maintains a shadow copy of model weights that is updated with a moving average.
+    """
+    def __init__(self, model, decay=0.9999, device=None):
+        """
+        Args:
+            model: The model to track
+            decay: EMA decay rate (higher = slower updates, more smoothing)
+            device: Device to store EMA weights on
+        """
+        self.model = deepcopy(model).eval()
+        self.decay = decay
+        self.device = device if device is not None else next(model.parameters()).device
+        self.model.to(self.device)
+        
+        # Disable gradient computation for EMA model
+        for param in self.model.parameters():
+            param.requires_grad = False
+    
+    def update(self, model):
+        """Update EMA weights with current model weights."""
+        with torch.no_grad():
+            for ema_param, model_param in zip(self.model.parameters(), model.parameters()):
+                ema_param.data.mul_(self.decay).add_(model_param.data, alpha=1 - self.decay)
+    
+    def state_dict(self):
+        """Return EMA model state dict."""
+        return self.model.state_dict()
+    
+    def load_state_dict(self, state_dict):
+        """Load EMA model state dict."""
+        self.model.load_state_dict(state_dict)
+
+
+def create_model(num_classes, pretrained=True, load_from_checkpoint=None, use_coord_attn=None):
     """
     Initialize ConvNeXt-Base model.
     Args:
@@ -45,7 +84,21 @@ def create_model(num_classes, pretrained=True, load_from_checkpoint=None):
         checkpoint = torch.load(load_from_checkpoint, map_location=config.DEVICE)
         model.load_state_dict(checkpoint['model_state_dict'])
         print(f"Loaded checkpoint from epoch {checkpoint.get('epoch', 'unknown')} with accuracy {checkpoint.get('accuracy', 'unknown'):.2f}%")
-    
+
+    # Decide whether to attach Coordinate Attention. Priority:
+    # 1) explicit `use_coord_attn` argument, 2) config.USE_COORD_ATTN flag
+    use_ca = use_coord_attn if use_coord_attn is not None else getattr(config, 'USE_COORD_ATTN', False)
+
+    if use_ca:
+        ca = CoordinateAttention(in_features)
+        if hasattr(model, 'features') and isinstance(model.features, nn.Sequential):
+            # Append CA as the final stage of features
+            model.features = nn.Sequential(*list(model.features.children()), ca)
+        else:
+            # Fallback: wrap existing features in Sequential
+            orig_features = model.features if hasattr(model, 'features') else None
+            model.features = nn.Sequential(orig_features, ca)
+
     return model.to(config.DEVICE)
 
 def freeze_backbone(model):
@@ -73,7 +126,7 @@ def unfreeze_backbone(model):
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable parameters: {trainable:,}")
 
-def train_one_epoch(model, loader, criterion, optimizer, scaler=None):
+def train_one_epoch(model, loader, criterion, optimizer, scaler=None, ema=None, use_mixup=False, mixup_alpha=0.2):
     model.train()
     running_loss = 0.0
     correct = 0
@@ -85,6 +138,10 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler=None):
         images = images.to(config.DEVICE)
         labels = labels.to(config.DEVICE)
         
+        # Apply MixUp if enabled
+        if use_mixup and mixup_alpha > 0:
+            images, labels_a, labels_b, lam = mixup_data(images, labels, mixup_alpha, config.DEVICE)
+        
         # Zero gradients
         optimizer.zero_grad()
         
@@ -92,7 +149,10 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler=None):
         if scaler:
             with torch.amp.autocast(device_type='cuda'):
                 outputs = model(images)
-                loss = criterion(outputs, labels)
+                if use_mixup and mixup_alpha > 0:
+                    loss = mixup_criterion(criterion, outputs, labels_a, labels_b, lam)
+                else:
+                    loss = criterion(outputs, labels)
             
             # Backward pass with scaler
             scaler.scale(loss).backward()
@@ -102,16 +162,29 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler=None):
             scaler.update()
         else:
             outputs = model(images)
-            loss = criterion(outputs, labels)
+            if use_mixup and mixup_alpha > 0:
+                loss = mixup_criterion(criterion, outputs, labels_a, labels_b, lam)
+            else:
+                loss = criterion(outputs, labels)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_MAX_NORM)
             optimizer.step()
+        
+        # Update EMA if provided
+        if ema is not None:
+            ema.update(model)
             
-        # Statistics
+        # Statistics (for MixUp, use dominant label for accuracy tracking)
         running_loss += loss.item()
         _, predicted = outputs.max(1)
-        total += labels.size(0)
-        correct += predicted.eq(labels).sum().item()
+        total += labels.size(0) if not use_mixup else labels_a.size(0)
+        
+        if use_mixup and mixup_alpha > 0:
+            # For MixUp, count correct predictions based on the dominant label
+            correct += (lam * predicted.eq(labels_a).sum().item() + 
+                       (1 - lam) * predicted.eq(labels_b).sum().item())
+        else:
+            correct += predicted.eq(labels).sum().item()
         
         loop.set_description(f"Loss: {loss.item():.4f}")
         
@@ -119,8 +192,18 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler=None):
     epoch_acc = 100. * correct / total
     return epoch_loss, epoch_acc
 
-def validate(model, loader, criterion):
-    model.eval()
+def validate(model, loader, criterion, use_ema=None):
+    """
+    Validate the model on a dataset.
+    
+    Args:
+        model: The main model
+        loader: DataLoader for validation/test data
+        criterion: Loss function
+        use_ema: Optional EMA model to use for validation instead of main model
+    """
+    eval_model = use_ema.model if use_ema is not None else model
+    eval_model.eval()
     running_loss = 0.0
     correct = 0
     total = 0
@@ -130,7 +213,7 @@ def validate(model, loader, criterion):
             images = images.to(config.DEVICE)
             labels = labels.to(config.DEVICE)
             
-            outputs = model(images)
+            outputs = eval_model(images)
             loss = criterion(outputs, labels)
             
             running_loss += loss.item()
@@ -169,12 +252,42 @@ def main():
 
     # 3. Setup Model
     if checkpoint_path:
-        model = create_model(config.NUM_CLASSES, pretrained=False, load_from_checkpoint=checkpoint_path)
+        # Fine-tuning from FER checkpoint -> enable CA only for affectnet fine-tuning
+        model = create_model(
+            config.NUM_CLASSES,
+            pretrained=False,
+            load_from_checkpoint=checkpoint_path,
+            use_coord_attn=(dataset_type == 'affectnet' and getattr(config, 'USE_COORD_ATTN', False))
+        )
     else:
-        model = create_model(config.NUM_CLASSES, pretrained=config.PRETRAINED)
+        model = create_model(
+            config.NUM_CLASSES,
+            pretrained=config.PRETRAINED,
+            use_coord_attn=(dataset_type == 'affectnet' and getattr(config, 'USE_COORD_ATTN', False))
+        )
     
     # 4. Setup Training Components
-    criterion = nn.CrossEntropyLoss()
+    # Compute class weights for imbalanced datasets
+    class_weights = None
+    if config.USE_CLASS_WEIGHTS:
+        print("\nComputing class weights for balanced loss...")
+        class_weights = compute_class_weights(train_loader.dataset, config.NUM_CLASSES)
+        class_weights = class_weights.to(config.DEVICE)
+    
+    # Create loss function with label smoothing and class weights
+    criterion = nn.CrossEntropyLoss(
+        weight=class_weights,
+        label_smoothing=config.LABEL_SMOOTHING
+    )
+    print(f"\nAdvanced training techniques:")
+    print(f"  Label smoothing: {config.LABEL_SMOOTHING}")
+    print(f"  Class weights:   {'Enabled' if config.USE_CLASS_WEIGHTS else 'Disabled'}")
+    print(f"  MixUp alpha:     {config.MIXUP_ALPHA}")
+    print(f"  EMA decay:       {config.EMA_DECAY}")
+    
+    # Initialize EMA
+    ema = ModelEMA(model, decay=config.EMA_DECAY, device=config.DEVICE)
+    print(f"  EMA initialized  ✓\n")
     
     # Create checkpoint dir
     if not os.path.exists(config.CHECKPOINT_DIR):
@@ -203,13 +316,16 @@ def main():
         for epoch in range(config.NUM_EPOCHS):
             print(f"\nEpoch {epoch+1}/{config.NUM_EPOCHS}")
             
-            train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, scaler)
-            val_loss, val_acc = validate(model, val_loader, criterion)
+            train_loss, train_acc = train_one_epoch(
+                model, train_loader, criterion, optimizer, scaler, 
+                ema=ema, use_mixup=True, mixup_alpha=config.MIXUP_ALPHA
+            )
+            val_loss, val_acc = validate(model, val_loader, criterion, use_ema=ema)
             
             scheduler.step()
             
             print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
-            print(f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
+            print(f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}% (EMA)")
             
             if val_acc > best_acc:
                 best_acc = val_acc
@@ -218,11 +334,12 @@ def main():
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': model.state_dict(),
+                    'ema_state_dict': ema.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'accuracy': best_acc,
                     'class_names': class_names
                 }, save_path)
-                print(f"Checkpointed best model to {save_path}")
+                print(f"Checkpointed best model (with EMA) to {save_path}")
             else:
                 epochs_without_improvement += 1
                 if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
@@ -250,13 +367,16 @@ def main():
         for epoch in range(config.FREEZE_BACKBONE_EPOCHS):
             print(f"\nEpoch {epoch+1}/{config.FREEZE_BACKBONE_EPOCHS}")
             
-            train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, scaler)
-            val_loss, val_acc = validate(model, val_loader, criterion)
+            train_loss, train_acc = train_one_epoch(
+                model, train_loader, criterion, optimizer, scaler,
+                ema=ema, use_mixup=True, mixup_alpha=config.MIXUP_ALPHA
+            )
+            val_loss, val_acc = validate(model, val_loader, criterion, use_ema=ema)
             
             scheduler.step()
             
             print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
-            print(f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
+            print(f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}% (EMA)")
             
             if val_acc > best_acc:
                 best_acc = val_acc
@@ -265,12 +385,13 @@ def main():
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': model.state_dict(),
+                    'ema_state_dict': ema.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'accuracy': best_acc,
                     'class_names': class_names,
                     'phase': 'frozen'
                 }, save_path)
-                print(f"Checkpointed best model to {save_path}")
+                print(f"Checkpointed best model (with EMA) to {save_path}")
             else:
                 epochs_without_improvement += 1
     
@@ -309,13 +430,16 @@ def main():
                 current_epoch = config.FREEZE_BACKBONE_EPOCHS + epoch + 1
                 print(f"\nEpoch {current_epoch}/{config.NUM_EPOCHS}")
                 
-                train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, scaler)
-                val_loss, val_acc = validate(model, val_loader, criterion)
+                train_loss, train_acc = train_one_epoch(
+                    model, train_loader, criterion, optimizer, scaler,
+                    ema=ema, use_mixup=True, mixup_alpha=config.MIXUP_ALPHA
+                )
+                val_loss, val_acc = validate(model, val_loader, criterion, use_ema=ema)
                 
                 scheduler.step()
                 
                 print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
-                print(f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
+                print(f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}% (EMA)")
                 
                 if val_acc > best_acc:
                     best_acc = val_acc
@@ -324,12 +448,13 @@ def main():
                     torch.save({
                         'epoch': current_epoch,
                         'model_state_dict': model.state_dict(),
+                        'ema_state_dict': ema.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
                         'accuracy': best_acc,
                         'class_names': class_names,
                         'phase': 'unfrozen'
                     }, save_path)
-                    print(f"Checkpointed best model to {save_path}")
+                    print(f"Checkpointed best model (with EMA) to {save_path}")
                 else:
                     epochs_without_improvement += 1
                     if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
@@ -350,15 +475,26 @@ def main():
     if os.path.exists(best_model_path):
         checkpoint = torch.load(best_model_path, map_location=config.DEVICE)
         model.load_state_dict(checkpoint['model_state_dict'])
-        print(f"Loaded best model from {best_model_path}")
+        
+        # Load EMA weights if available
+        if 'ema_state_dict' in checkpoint:
+            ema.load_state_dict(checkpoint['ema_state_dict'])
+            print(f"Loaded best model (with EMA) from {best_model_path}")
+        else:
+            print(f"Loaded best model from {best_model_path} (no EMA weights found)")
     
+    # Evaluate with both regular model and EMA
     test_loss, test_acc = validate(model, test_loader, criterion)
-    print(f"Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.2f}%")
+    test_loss_ema, test_acc_ema = validate(model, test_loader, criterion, use_ema=ema)
+    
+    print(f"\nTest Results:")
+    print(f"  Regular model: Loss: {test_loss:.4f} | Acc: {test_acc:.2f}%")
+    print(f"  EMA model:     Loss: {test_loss_ema:.4f} | Acc: {test_acc_ema:.2f}%")
 
     print(f"\n{'='*60}")
     print(f"Training complete!")
-    print(f"Best validation accuracy: {best_acc:.2f}%")
-    print(f"Final test accuracy: {test_acc:.2f}%")
+    print(f"Best validation accuracy (EMA): {best_acc:.2f}%")
+    print(f"Final test accuracy (EMA): {test_acc_ema:.2f}%")
     print(f"{'='*60}")
 
 if __name__ == "__main__":

@@ -2,8 +2,10 @@ import os
 from typing import List, Tuple
 
 import torch
+import numpy as np
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader, Subset
+from collections import Counter
 
 import config
 
@@ -178,3 +180,91 @@ def get_data_loaders(data_dir=None, batch_size=config.BATCH_SIZE, num_workers=co
     )
 
     return train_loader, val_loader, test_loader, class_names
+
+
+def compute_class_weights(dataset, num_classes):
+    """
+    Compute class weights for imbalanced datasets using inverse frequency.
+    
+    Args:
+        dataset: PyTorch dataset with targets attribute or ImageFolder
+        num_classes: Number of classes
+    
+    Returns:
+        torch.Tensor: Class weights for CrossEntropyLoss
+    """
+    # Extract targets from dataset
+    if hasattr(dataset, 'targets'):
+        targets = dataset.targets
+    elif hasattr(dataset, 'dataset') and hasattr(dataset.dataset, 'targets'):
+        # Handle Subset wrapper
+        targets = [dataset.dataset.targets[i] for i in dataset.indices]
+    else:
+        raise ValueError("Dataset must have 'targets' attribute or be a Subset of such dataset")
+    
+    # Count class frequencies
+    class_counts = Counter(targets)
+    
+    # Ensure all classes are represented
+    for i in range(num_classes):
+        if i not in class_counts:
+            class_counts[i] = 1  # Avoid division by zero
+    
+    # Compute inverse frequency weights
+    total_samples = len(targets)
+    weights = torch.zeros(num_classes)
+    
+    for class_idx in range(num_classes):
+        count = class_counts[class_idx]
+        weights[class_idx] = total_samples / (num_classes * count)
+    
+    print("\nClass distribution and weights:")
+    for i in range(num_classes):
+        print(f"  Class {i}: {class_counts[i]:5d} samples, weight: {weights[i]:.4f}")
+    
+    return weights
+
+
+def mixup_data(x, y, alpha=0.2, device='cuda'):
+    """
+    Apply MixUp augmentation to a batch.
+    
+    Args:
+        x: Input batch (images)
+        y: Target labels
+        alpha: MixUp interpolation strength
+        device: Device to create tensors on
+    
+    Returns:
+        mixed_x: Mixed images
+        y_a, y_b: Original labels for the two mixed samples
+        lam: Mixing coefficient
+    """
+    if alpha > 0:
+        lam = np.random.beta(alpha, alpha)
+    else:
+        lam = 1.0
+    
+    batch_size = x.size(0)
+    index = torch.randperm(batch_size).to(device)
+    
+    mixed_x = lam * x + (1 - lam) * x[index, :]
+    y_a, y_b = y, y[index]
+    
+    return mixed_x, y_a, y_b, lam
+
+
+def mixup_criterion(criterion, pred, y_a, y_b, lam):
+    """
+    Compute MixUp loss.
+    
+    Args:
+        criterion: Loss function
+        pred: Model predictions
+        y_a, y_b: Original labels for the two mixed samples
+        lam: Mixing coefficient
+    
+    Returns:
+        Mixed loss
+    """
+    return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
