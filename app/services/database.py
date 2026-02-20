@@ -24,7 +24,6 @@ async def init_db():
             )
         """)
         
-        # comfortFeedback table removed (not required)
         # Conversation history table: store individual messages with role and timestamp
         await db.execute("""
             CREATE TABLE IF NOT EXISTS conversationHistory (
@@ -88,4 +87,3 @@ async def log_conversation_message(seat_number: str, role: str, content: str):
         print(f"Error logging conversation message: {e}")
 
 
-# Note: feedback logging removed per cleanup request. Use other telemetry if needed.

@@ -762,44 +762,216 @@ body {
 }
 
 /* ===========================================
-   Mobile Responsive
+   Mobile & Tablet Responsive
    =========================================== */
-@media (max-width: 600px) {
+
+/* Remove 300 ms tap delay and enable smooth scroll on all touch screens */
+@media (hover: none) and (pointer: coarse) {
+    .settings-btn,
+    .send-btn,
+    .mic-btn,
+    .quick-prompt,
+    .service-confirm-btn,
+    .settings-close,
+    .backdrop {
+        touch-action: manipulation;
+    }
+
+    .messages-area {
+        -webkit-overflow-scrolling: touch;
+    }
+}
+
+/* --- Tablet landscape & small desktop (≤ 1024px) --- */
+@media (max-width: 1024px) {
+    .chat-container {
+        max-width: 100%;
+    }
+}
+
+/* --- Tablet portrait / large phone landscape (≤ 768px) --- */
+@media (max-width: 768px) {
     .header {
         padding: 12px 16px;
+    }
+
+    .header-logo {
+        width: 36px;
+        height: 36px;
+        font-size: 18px;
+    }
+
+    .header-title {
+        font-size: 16px;
+    }
+
+    .header-subtitle {
+        font-size: 11px;
+    }
+
+    .messages-area {
+        padding: 14px 16px;
+        gap: 12px;
+    }
+
+    .welcome-avatar {
+        width: 64px;
+        height: 64px;
+        font-size: 28px;
+    }
+
+    .welcome-title {
+        font-size: 20px;
+    }
+
+    .welcome-subtitle {
+        font-size: 14px;
+    }
+
+    .message-content {
+        font-size: 14px;
+    }
+
+    .input-area {
+        padding: 12px 16px;
+        /* account for Android/iOS gesture bar */
+        padding-bottom: max(12px, env(safe-area-inset-bottom));
+    }
+
+    .settings-panel {
+        width: 300px;
+    }
+}
+
+/* --- Phone (≤ 480px) --- */
+@media (max-width: 480px) {
+    .header {
+        padding: 10px 14px;
     }
 
     .header-subtitle {
         display: none;
     }
 
+    .header-logo {
+        width: 32px;
+        height: 32px;
+        font-size: 16px;
+    }
+
+    .header-title {
+        font-size: 15px;
+    }
+
     .messages-area {
-        padding: 16px;
+        padding: 12px;
+        gap: 10px;
     }
 
     .message {
-        max-width: 90%;
+        max-width: 92%;
+    }
+
+    .message-content {
+        font-size: 14px;
+        padding: 10px 14px;
+    }
+
+    .welcome-screen {
+        padding: 24px 16px;
+    }
+
+    .welcome-avatar {
+        width: 56px;
+        height: 56px;
+        font-size: 24px;
+        margin-bottom: 14px;
+    }
+
+    .welcome-title {
+        font-size: 18px;
+    }
+
+    .welcome-subtitle {
+        font-size: 13px;
+    }
+
+    .quick-prompts {
+        flex-direction: column;
+        align-items: stretch;
+        max-width: 100%;
+    }
+
+    .quick-prompt {
+        text-align: left;
+        padding: 12px 16px;
+        font-size: 13px;
     }
 
     .input-area {
-        padding: 12px 16px 20px;
+        padding: 10px 12px;
+        /* Inset for Android nav bar / iPhone home indicator */
+        padding-bottom: max(16px, env(safe-area-inset-bottom));
+        border-radius: 0;
+    }
+
+    .input-context {
+        gap: 6px;
+        margin-bottom: 10px;
+    }
+
+    .context-chip {
+        font-size: 11px;
+        padding: 6px 10px;
+    }
+
+    .context-chip input {
+        width: 48px;
+    }
+
+    .input-box {
+        padding: 10px 14px;
+    }
+
+    /* Prevents automatic zoom on input focus in Android/iOS */
+    .input-box textarea {
+        font-size: 16px;
+    }
+
+    .send-btn {
+        width: 44px;
+        height: 44px;
+        font-size: 18px;
     }
 
     .settings-panel {
         width: 100%;
     }
 
-    .quick-prompts {
-        flex-direction: column;
-    }
-
-    .quick-prompt {
-        text-align: left;
-    }
-
     .service-confirm {
         width: 95%;
-        padding: 24px 20px;
+        padding: 24px 18px;
     }
-}
+
+    .service-confirm-icon {
+        font-size: 36px;
+    }
+
+    .service-confirm-title {
+        font-size: 18px;
+    }
+
+    .service-confirm-text {
+        font-size: 14px;
+    }
+
+    .service-confirm-btn {
+        font-size: 14px;
+        padding: 11px 16px;
+    }
+
+    .toast {
+        width: 90%;
+        font-size: 13px;
+    }
 }
