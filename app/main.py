@@ -92,10 +92,10 @@ class CVStreamProcessor:
                 print(f"✅ Seat manager loaded with {len(self.seat_manager.seats)} seats")
             else:
                 print(f"⚠️  Failed to load calibration, using default grid")
-                self.seat_manager._generate_grid_zones()
+                self.seat_manager._create_grid_zones()
         else:
             print(f"⚠️  No calibration found at {calibration_path}, using default grid")
-            self.seat_manager._generate_grid_zones()
+            self.seat_manager._create_grid_zones()
         
         # Get actual dimensions
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -115,10 +115,10 @@ class CVStreamProcessor:
                 print(f"✅ Seat manager loaded with {len(self.seat_manager.seats)} seats")
             else:
                 print(f"⚠️  Failed to load calibration, using default grid")
-                self.seat_manager._generate_grid_zones()
+                self.seat_manager._create_grid_zones()
         else:
             print(f"⚠️  No calibration found at {calibration_path}, using default grid")
-            self.seat_manager._generate_grid_zones()
+            self.seat_manager._create_grid_zones()
         
         self.emotion_update_interval = 0.3
         self.last_emotion_update = time.time()
