@@ -414,7 +414,7 @@
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
-                                query: 'Tell me about: ' + pendingService.value.query,
+                                query: 'If it is an in-flight service request that you CANNOT assist with, Please inform me to request cabin crew service asssistance. Otherwise, Tell me about: ' + pendingService.value.query,
                                 destination: destination.value,
                                 seatNumber: seatNumber.value,
                                 language: language.value
